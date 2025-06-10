@@ -14,6 +14,8 @@ See the docstrings for the individual classes for 'working' examples.
 
 """
 import os
+import shutil
+import subprocess
 
 from looseversion import LooseVersion
 
@@ -109,6 +111,31 @@ class Info(PackageInfo):
         if cls.version():
             return os.environ["SUBJECTS_DIR"]
         return None
+
+    @staticmethod
+    def cuda_cupport():
+        """Check if tensorflow included in fspython can run on GPU
+
+        :Returns
+        -------
+
+        cuda_support : bool
+            True if tensorflow can run on GPU
+
+        """
+
+        fspython = shutil.which('fspython')
+        if fspython is None:
+            return False
+        try:
+            p = subprocess.run(
+                [fspython, "-c", "import os;os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3';import tensorflow as tf;print(len(tf.config.list_physical_devices('GPU'))>0)"],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+        except (OSError, UnicodeDecodeError):
+            return False
+        return p.stdout.splitlines()[0]=="True"
 
 
 class FSTraitedSpec(CommandLineInputSpec):

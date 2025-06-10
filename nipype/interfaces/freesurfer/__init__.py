@@ -27,6 +27,8 @@ from .preprocess import (
     SegmentWM,
     EditWMwithAseg,
     ConcatenateLTA,
+    SynthStrip,
+    SynthSeg,
 )
 from .model import (
     MRISPreproc,
