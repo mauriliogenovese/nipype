@@ -35,3 +35,4 @@ _version.py
 uv.lock
 .venv/
 .tox/
+test_docker/

@@ -405,6 +405,24 @@ class CommandLineInputSpec(BaseInterfaceInputSpec):
     environ = traits.DictStrStr(
         desc="Environment variables", usedefault=True, nohash=True
     )
+    container = Str(
+        desc=(
+            "Run this command inside the given container image "
+            "(e.g. 'bids/mriqc:latest') instead of natively on the host. "
+            "Leave undefined to run natively (default, unchanged behavior)."
+        ),
+        requires=["container_type"],
+        nohash=True,
+    )
+    container_type = traits.Enum(
+        "docker",
+        usedefault=True,
+        nohash=True,
+        desc=(
+            "Container engine used to run `container`. Only 'docker' is "
+            "currently supported."
+        ),
+    )
 
 
 class StdOutCommandLineInputSpec(CommandLineInputSpec):

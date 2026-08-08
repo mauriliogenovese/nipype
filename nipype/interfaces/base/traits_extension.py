@@ -126,12 +126,16 @@ class BasePath(TraitType):
 
     def validate(self, objekt, name, value, return_pathlike=False):
         """Validate a value change."""
+        is_container_path = isinstance(value, ContainerPath)
+
         try:
             value = Path(value)  # Use pathlib's validation
         except Exception:
             self.error(objekt, name, str(value))
 
-        if self.exists:
+        # ContainerPath values only make sense inside the container image;
+        # skip host filesystem checks and host path resolution for them.
+        if self.exists and not is_container_path:
             if not value.exists():
                 self.error(objekt, name, str(value))
 
@@ -141,12 +145,11 @@ class BasePath(TraitType):
             if self._is_dir and not value.is_dir():
                 self.error(objekt, name, str(value))
 
-        if self.resolve:
+        if self.resolve and not is_container_path:
             value = path_resolve(value, strict=self.exists)
 
         if not return_pathlike:
-            value = str(value)
-
+            value = ContainerPath(str(value)) if is_container_path else str(value)
         return value
 
 
@@ -205,6 +208,20 @@ class Directory(BasePath):
     """
 
     _is_dir = True
+
+
+class ContainerPath(str):
+    """A path that is meaningful only inside a container image, not on
+    the host (e.g. a template shipped with the image, such as
+    ``$FSL_DIR/data/standard/...``). Values of this type are exempt
+    from host filesystem validation (``exists=True``) on File/Directory
+    traits, are never included in a container's mount plan, and are
+    passed through into the containerized command line verbatim --
+    including unexpanded shell variables, which get expanded by the
+    shell running inside the container.
+    """
+
+    __slots__ = ()
 
 
 class File(BasePath):
@@ -323,15 +340,14 @@ class File(BasePath):
 
     def validate(self, objekt, name, value, return_pathlike=False):
         """Validate a value change."""
+        is_container_path = isinstance(value, ContainerPath)
         value = super().validate(objekt, name, value, return_pathlike=True)
         if self._exts:
             fname = value.name
             if not any(fname.endswith(e) for e in self._exts):
                 self.error(objekt, name, str(value))
-
         if not return_pathlike:
-            value = str(value)
-
+            value = ContainerPath(str(value)) if is_container_path else str(value)
         return value
 
 
@@ -597,3 +613,20 @@ def rebase_path_traits(thistrait, value, cwd):
 def resolve_path_traits(thistrait, value, cwd):
     """Resolve a BasePath-derived trait given an interface spec."""
     return _recurse_on_path_traits(_resolve_path, thistrait, value, cwd)
+
+def collect_path_traits(thistrait, value, cwd):
+    """Collect every BasePath-derived leaf value reachable from
+    ``value`` given the trait definition ``thistrait``, recursing
+    through List/Dict/Tuple/TraitCompound wrappers (same traversal
+    used by rebase_path_traits/resolve_path_traits). Returns a flat
+    list of the raw values found, unmodified, so callers can inspect
+    their original type (e.g. to distinguish ContainerPath).
+    """
+    collected = []
+
+    def _collect(value, cwd):
+        collected.append(value)
+        return value
+
+    _recurse_on_path_traits(_collect, thistrait, value, cwd)
+    return collected

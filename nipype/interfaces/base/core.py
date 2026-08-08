@@ -16,6 +16,7 @@ import subprocess as sp
 import shlex
 import simplejson as json
 from traits.trait_errors import TraitError
+from pathlib import Path
 
 from looseversion import LooseVersion
 
@@ -33,7 +34,7 @@ from ...utils.subprocess import run_command
 
 from ...external.due import due
 
-from .traits_extension import traits, isdefined, BasePath, Undefined
+from .traits_extension import traits, isdefined, BasePath, Undefined, ContainerPath, collect_path_traits
 from .specs import (
     BaseInterfaceInputSpec,
     CommandLineInputSpec,
@@ -748,27 +749,83 @@ class CommandLine(BaseInterface):
 
         # which $cmd
         executable_name = shlex.split(self._cmd_prefix + self.cmd)[0]
-        cmd_path = which(executable_name, env=runtime.environ)
 
-        if cmd_path is None:
-            raise OSError(
-                'No command "%s" found on host %s. Please check that the '
-                "corresponding package is installed."
-                % (executable_name, runtime.hostname)
+        # Containerized execution: the executable may not exist on the host
+        # (it lives inside the image), so skip which()/get_dependencies on
+        # the host and check the container engine is available instead.
+        if isdefined(self.inputs.container):
+            runtime.command_path = getattr(
+                self, "_container_engine_path", None
+            ) or which(self.inputs.container_type, env=runtime.environ)
+            runtime.dependencies = "<skipped: containerized execution>"
+            runtime.cmdline = self._containerize_cmdline(runtime)
+        else:
+            cmd_path = which(executable_name, env=runtime.environ)
+            if cmd_path is None:
+                raise OSError(
+                    'No command "%s" found on host %s. Please check that the '
+                    "corresponding package is installed."
+                    % (executable_name, runtime.hostname)
+                )
+            runtime.command_path = cmd_path
+            runtime.dependencies = (
+                get_dependencies(executable_name, runtime.environ)
+                if self._ldd
+                else "<skipped>"
             )
 
-        runtime.command_path = cmd_path
-        runtime.dependencies = (
-            get_dependencies(executable_name, runtime.environ)
-            if self._ldd
-            else "<skipped>"
-        )
         runtime = run_command(
             runtime,
             output=self.terminal_output,
             write_cmdline=self.write_cmdline,
         )
         return runtime
+
+    def _container_extra_mounts(self):
+        """Hook for subclasses to inject extra (host_path, container_path,
+        mode) bind mounts beyond the generic input/output mount plan (e.g.
+        a package-specific license file). mode is '' for read-write or
+        ':ro' for read-only. Empty by default."""
+        return []
+
+    def _container_extra_env(self):
+        """Hook for subclasses to inject extra environment variables into
+        the container beyond self._get_environ() (e.g. FS_LICENSE). Empty
+        dict by default."""
+        return {}
+
+    def _containerize_cmdline(self, runtime):
+        """Wrap ``runtime.cmdline`` to run inside ``self.inputs.container``.
+
+        Mounts every host directory referenced by File/Directory inputs
+        (plus the node's cwd) into the container at the same path (mirror
+        mount) -- all read-write, per design. Runs as the image's own
+        default user/environment (no --user override; see
+        _check_container_available for why this requires a root-default
+        image), with a permissive umask so newly created output files are
+        accessible to the host user.
+        """
+
+        cwd = Path(runtime.cwd).resolve()
+        mount_roots = self._container_mount_sources(runtime)
+        mount_roots.add(cwd)
+        mount_roots = self._collapse_mount_roots(mount_roots)
+
+        docker_cmd = ["docker", "run", "--rm", "-w", str(cwd)]
+        for root in mount_roots:
+            mode = "" if os.access(root, os.W_OK) else ":ro"
+            docker_cmd += ["-v", f"{root}:{root}{mode}"]
+
+        for host_path, container_path, mode in self._container_extra_mounts():
+            docker_cmd += ["-v", f"{host_path}:{container_path}{mode}"]
+
+        for key, val in {**self._get_environ(), **self._container_extra_env()}.items():
+            docker_cmd += ["-e", f"{key}={val}"]
+
+        docker_cmd.append(self.inputs.container)
+        docker_cmd += ["sh", "-c", f"umask 0000 && {runtime.cmdline}"]
+
+        return " ".join(shlex.quote(part) for part in docker_cmd)
 
     def _format_arg(self, name, trait_spec, value):
         """A helper function for _parse_inputs
@@ -813,10 +870,16 @@ class CommandLine(BaseInterface):
                 return argstr % sep.join(str(elt) for elt in value)
         else:
             if trait_spec.is_trait_type(BasePath):
-                if "'%s'" not in argstr and '"%s"' not in argstr:
+                if isinstance(value, ContainerPath):
+                    # ContainerPath values are meant to be expanded by the shell
+                    # running inside the container (e.g. $FSL_DIR/...); quoting
+                    # them would prevent that expansion, since a POSIX shell never
+                    # expands variables inside single quotes.
+                    pass
+                elif "'%s'" not in argstr and '"%s"' not in argstr:
                     value = shlex.quote(value)
-            # Append options using format string.
-            return argstr % value
+                # Append options using format string.
+                return argstr % value
 
     def _filename_from_source(self, name, chain=None):
         if chain is None:
@@ -963,6 +1026,104 @@ class CommandLine(BaseInterface):
         first_args = [el for _, el in sorted(initial_args.items())]
         last_args = [el for _, el in sorted(final_args.items())]
         return first_args + all_args + last_args
+
+    def run(self, **inputs):
+        """Execute this interface.
+
+        Extends BaseInterface.run() with container-specific fail-fast
+        checks (engine installed, image inspectable, image runs as root),
+        following the same pattern used by other CommandLine subclasses
+        that add their own pre-checks before delegating to super().run().
+        """
+        if isdefined(self.inputs.container):
+            self._container_engine_path = self._check_container_available(
+                self.inputs.container, self.inputs.container_type
+            )
+        return super().run(**inputs)
+
+    def _check_container_available(self, image, container_type):
+        """Fail fast, before running, if the container engine isn't
+        installed on the host, or the image can't be found/inspected.
+
+        Also verifies the image's default user is root -- running as
+        non-root would require chmod/chown on host-owned files to make
+        them accessible inside the container, which this implementation
+        deliberately never does (see _containerize_cmdline) -- reusing the
+        same ``inspect`` call instead of a separate round-trip.
+
+        Returns the resolved path to the engine binary, so _run_interface
+        can reuse it without calling which() a second time.
+        """
+        engine_path = which(container_type, env=os.environ)
+        if engine_path is None:
+            raise OSError(
+                f'Container engine "{container_type}" not found on host. '
+                "Please install it to run containerized commands."
+            )
+
+        result = sp.run(
+            [container_type, "inspect", "--format", "{{.Config.User}}", image],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Container image '{image}' could not be inspected via "
+                f"'{container_type} inspect' (is it pulled/built locally?). "
+                f"Error:\n{result.stderr.strip()}"
+            )
+
+        user = result.stdout.strip()
+        if user not in ("", "0", "root", "0:0"):
+            raise RuntimeError(
+                f"Image '{image}' does not run as root by default "
+                f"(default user: '{user}'). This interface requires "
+                "container images whose default user is root, since file "
+                "permissions on the host are never modified to accommodate "
+                "non-root containers."
+            )
+
+        return engine_path
+
+    def _container_mount_sources(self, runtime):
+        """Resolve host filesystem directories to bind-mount into the
+        container, covering every File/Directory-valued input (including
+        inside List/Dict/Tuple/InputMultiPath wrappers). ContainerPath
+        values are excluded: they refer to paths inside the image, not
+        the host, and must never be mounted or rewritten. Symlinks are
+        resolved so the mount covers the real target, not a dangling link.
+        """
+        cwd = runtime.cwd
+        roots = set()
+
+        for name in self.inputs.copyable_trait_names():
+            value = getattr(self.inputs, name)
+            if not isdefined(value):
+                continue
+            thistrait = self.inputs.trait(name)
+            for leaf in collect_path_traits(thistrait, value, cwd):
+                if isinstance(leaf, ContainerPath) or not isdefined(leaf):
+                    continue
+                try:
+                    resolved = Path(str(leaf)).resolve()
+                except Exception:
+                    continue
+                # Mount the containing directory, not the bare file, so
+                # sibling files (e.g. .json sidecars) stay reachable too.
+                roots.add(resolved if resolved.is_dir() else resolved.parent)
+
+        return roots
+
+    @staticmethod
+    def _collapse_mount_roots(paths):
+        """Drop any path already covered by another in the set (keep only
+        the outermost root of each nested chain), to avoid redundant or
+        overlapping bind mounts."""
+        ordered = sorted(paths, key=lambda p: len(p.parts))
+        kept = []
+        for p in ordered:
+            if not any(p == k or k in p.parents for k in kept):
+                kept.append(p)
+        return kept
 
 
 class StdOutCommandLine(CommandLine):

@@ -48,6 +48,7 @@ from .traits_extension import (
     OutputMultiPath,
     InputMultiPath,
     Tuple,
+    ContainerPath,
 )
 
 from .support import Bunch, InterfaceResult, NipypeInterfaceError
