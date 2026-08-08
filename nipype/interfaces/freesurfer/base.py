@@ -124,7 +124,58 @@ class FSTraitedSpec(CommandLineInputSpec):
     )
 
 
-class FSCommand(CommandLine):
+class FSLicenseMixin:
+    """Provides FreeSurfer license resolution/injection for containerized
+    execution. Used by FSCommand and by other FreeSurfer CommandLine
+    subclasses that, for historical reasons, don't inherit from
+    FSCommand directly (see GH nipy/nipype#2655 -- ReconAll is one of
+    these; this mixin lets it opt in without depending on a hierarchy
+    fix that issue explicitly decided against).
+    """
+
+    _CONTAINER_LICENSE_PATH = "/tmp/fs_license.txt"
+    _default_license_file = None
+
+    @classmethod
+    def set_default_license_file(cls, license_file):
+        """Set a FreeSurfer license file used by default by every class
+        using this mixin (FSCommand, ReconAll, ...), unless a specific
+        node overrides it via inputs.license_file. Sets the attribute
+        on FSLicenseMixin itself (not on `cls`), so the default is
+        shared across all FreeSurfer interfaces regardless of which one
+        this is called on."""
+        FSLicenseMixin._default_license_file = os.path.abspath(license_file)
+
+    def _resolved_license_file(self):
+        """Resolve which license file to use, in order of precedence:
+        1. This instance's own inputs.license_file, if set.
+        2. The class-wide default set via set_default_license_file().
+        3. FS_LICENSE already defined in the host environment.
+        Returns None if no license is configured anywhere.
+        """
+        if isdefined(getattr(self.inputs, "license_file", Undefined)):
+            return str(Path(self.inputs.license_file).resolve())
+        if FSLicenseMixin._default_license_file:
+            return FSLicenseMixin._default_license_file
+        host_license = os.environ.get("FS_LICENSE")
+        if host_license:
+            return str(Path(host_license).resolve())
+        return None
+
+    def _container_extra_mounts(self):
+        mounts = super()._container_extra_mounts()
+        license_file = self._resolved_license_file()
+        if license_file:
+            mounts.append((license_file, self._CONTAINER_LICENSE_PATH, ":ro"))
+        return mounts
+
+    def _container_extra_env(self):
+        env = super()._container_extra_env()
+        if self._resolved_license_file():
+            env["FS_LICENSE"] = self._CONTAINER_LICENSE_PATH
+        return env
+
+class FSCommand(FSLicenseMixin, CommandLine):
     """General support for FreeSurfer commands.
 
     Every FS command accepts 'subjects_dir' input.
@@ -133,9 +184,6 @@ class FSCommand(CommandLine):
     input_spec = FSTraitedSpec
 
     _subjects_dir = None
-
-    _CONTAINER_LICENSE_PATH = "/tmp/fs_license.txt"
-    _default_license_file = None
 
     def __init__(self, **inputs):
         super().__init__(**inputs)
@@ -190,45 +238,6 @@ class FSCommand(CommandLine):
         ver = Info.looseversion()
         if ver > LooseVersion("0.0.0"):
             return ver.vstring
-
-    @classmethod
-    def set_default_license_file(cls, license_file):
-        """Set a FreeSurfer license file to be used by default by every
-        FSCommand instance, unless a specific node overrides it via
-        inputs.license_file. Call this once (e.g. at the top of a
-        script or workflow) instead of setting license_file on every
-        node individually."""
-        cls._default_license_file = os.path.abspath(license_file)
-
-    def _resolved_license_file(self):
-        """Resolve which license file to use, in order of precedence:
-        1. This instance's own inputs.license_file, if set.
-        2. The class-wide default set via set_default_license_file().
-        3. FS_LICENSE already defined in the host environment (so
-           existing host setups keep working without any change).
-        Returns None if no license is configured anywhere.
-        """
-        if isdefined(getattr(self.inputs, "license_file", Undefined)):
-            return str(Path(self.inputs.license_file).resolve())
-        if self._default_license_file:
-            return self._default_license_file
-        host_license = os.environ.get("FS_LICENSE")
-        if host_license:
-            return str(Path(host_license).resolve())
-        return None
-
-    def _container_extra_mounts(self):
-        mounts = super()._container_extra_mounts()
-        license_file = self._resolved_license_file()
-        if license_file:
-            mounts.append((license_file, self._CONTAINER_LICENSE_PATH, ":ro"))
-        return mounts
-
-    def _container_extra_env(self):
-        env = super()._container_extra_env()
-        if self._resolved_license_file():
-            env["FS_LICENSE"] = self._CONTAINER_LICENSE_PATH
-        return env
 
 
 class FSSurfaceCommand(FSCommand):

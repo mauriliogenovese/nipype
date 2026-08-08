@@ -28,7 +28,7 @@ from ..base import (
     isdefined,
     InputMultiObject,
 )
-from .base import FSCommand, FSTraitedSpec, FSTraitedSpecOpenMP, FSCommandOpenMP, Info
+from .base import FSCommand, FSTraitedSpec, FSTraitedSpecOpenMP, FSCommandOpenMP, Info, FSLicenseMixin
 from .utils import copy2subjdir
 
 __docformat__ = "restructuredtext"
@@ -1044,6 +1044,12 @@ class ReconAllInputSpec(CommandLineInputSpec):
     mri_aparc2aseg = traits.Str(
         desc="Flags to pass to mri_aparc2aseg commands", xor=["expert"]
     )
+    license_file = File(
+        exists=True,
+        desc=(
+            "Path to the FreeSurfer license file, only used when this interface runs inside a container"
+        ),
+    )
 
 
 class ReconAllOutputSpec(FreeSurferSource.output_spec):
@@ -1051,7 +1057,7 @@ class ReconAllOutputSpec(FreeSurferSource.output_spec):
     subject_id = traits.Str(desc="Subject name for whom to retrieve data")
 
 
-class ReconAll(CommandLine):
+class ReconAll(FSLicenseMixin, CommandLine):
     """Uses recon-all to generate surfaces and parcellations of structural data
     from anatomical images of a subject.
 

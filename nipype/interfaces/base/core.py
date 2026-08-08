@@ -811,7 +811,7 @@ class CommandLine(BaseInterface):
         mount_roots.add(cwd)
         mount_roots = self._collapse_mount_roots(mount_roots)
 
-        docker_cmd = ["docker", "run", "--rm", "-w", str(cwd)]
+        docker_cmd = ["docker", "run", "--rm", "--init", "-w", str(cwd)]
         for root in mount_roots:
             mode = "" if os.access(root, os.W_OK) else ":ro"
             docker_cmd += ["-v", f"{root}:{root}{mode}"]
@@ -823,7 +823,7 @@ class CommandLine(BaseInterface):
             docker_cmd += ["-e", f"{key}={val}"]
 
         docker_cmd.append(self.inputs.container)
-        docker_cmd += ["sh", "-c", f"umask 0000 && {runtime.cmdline}"]
+        docker_cmd += ["sh", "-c", f"umask 0000 && exec {runtime.cmdline}"]
 
         return " ".join(shlex.quote(part) for part in docker_cmd)
 
@@ -878,8 +878,8 @@ class CommandLine(BaseInterface):
                     pass
                 elif "'%s'" not in argstr and '"%s"' not in argstr:
                     value = shlex.quote(value)
-                # Append options using format string.
-                return argstr % value
+            # Append options using format string.
+            return argstr % value
 
     def _filename_from_source(self, name, chain=None):
         if chain is None:
