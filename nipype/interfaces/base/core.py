@@ -805,6 +805,16 @@ class CommandLine(BaseInterface):
         dict by default."""
         return {}
 
+    def _container_extra_prelude(self):
+        """Hook for subclasses to inject extra shell commands to run
+        inside the container, before the main command (e.g. package-
+        specific setup that can only be resolved inside the image's own
+        environment, such as symlinking a license file to a version-
+        dependent path known only inside the image). Returns a list of
+        shell command strings, each treated as best-effort (failures are
+        swallowed, never break the main command). Empty by default."""
+        return []
+
     def _containerize_cmdline(self, runtime):
         """Wrap ``runtime.cmdline`` to run inside ``self.inputs.container``.
 
@@ -842,7 +852,14 @@ class CommandLine(BaseInterface):
             docker_cmd += ["-e", f"{key}={val}"]
 
         docker_cmd.append(self.inputs.container)
-        docker_cmd += ["sh", "-c", f"umask 0000; {runtime.cmdline}"]
+
+        prelude_parts = [
+            f"{{ {cmd} ; }} 2>/dev/null" for cmd in self._container_extra_prelude()
+        ]
+        prelude = "; ".join(prelude_parts)
+        prelude_prefix = f"{prelude}; " if prelude else ""
+
+        docker_cmd += ["sh", "-c", f"umask 0000; {prelude_prefix}{runtime.cmdline}"]
 
         return " ".join(shlex.quote(part) for part in docker_cmd)
 

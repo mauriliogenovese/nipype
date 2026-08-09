@@ -149,6 +149,22 @@ class FSLicenseMixin:
             raise ValueError(msg)
         FSLicenseMixin._default_license_file = os.path.abspath(license_file)
 
+    def _container_extra_prelude(self):
+        prelude = super()._container_extra_prelude()
+        if self._resolved_license_file():
+            # Best-effort compatibility with FreeSurfer versions predating
+            # (or with unreliable early support for) FS_LICENSE: also drop
+            # the license where those versions expect it to be found,
+            # $FREESURFER_HOME/license.txt. FREESURFER_HOME is resolved
+            # here inside the container -- the image already has it set
+            # correctly for its own version, so no host-side guessing is
+            # needed. Silently skipped if unset or not writable.
+            prelude.append(
+                f'[ -n "$FREESURFER_HOME" ] && '
+                f'ln -sf {self._CONTAINER_LICENSE_PATH} "$FREESURFER_HOME/license.txt"'
+            )
+        return prelude
+
     def _resolved_license_file(self):
         """Resolve which license file to use, in order of precedence:
         1. This instance's own inputs.license_file, if set.
