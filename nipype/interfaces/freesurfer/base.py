@@ -144,6 +144,9 @@ class FSLicenseMixin:
         on FSLicenseMixin itself (not on `cls`), so the default is
         shared across all FreeSurfer interfaces regardless of which one
         this is called on."""
+        if not os.path.exists(os.path.abspath(license_file)):
+            msg = "License file %s not found. " % license_file
+            raise ValueError(msg)
         FSLicenseMixin._default_license_file = os.path.abspath(license_file)
 
     def _resolved_license_file(self):

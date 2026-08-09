@@ -1046,9 +1046,13 @@ class ReconAllInputSpec(CommandLineInputSpec):
     )
     license_file = File(
         exists=True,
-        desc=(
-            "Path to the FreeSurfer license file, only used when this interface runs inside a container"
-        ),
+        desc="Path to the FreeSurfer license file, only used when this interface runs inside a container",
+    )
+    umask = traits.Range(
+        low=0,
+        high=0o777,
+        argstr="-umask %d",
+        desc="Set unix file permission mask (recon-all default: 002)",
     )
 
 
@@ -1566,6 +1570,14 @@ class ReconAll(FSLicenseMixin, CommandLine):
         "mris_anatomical_stats",
         "mri_aparc2aseg",
     ]
+
+    def __init__(self, **inputs):
+        super().__init__(**inputs)
+        self.inputs.on_trait_change(self._container_update, "container")
+
+    def _container_update(self):
+        if isdefined(self.inputs.container) and not isdefined(self.inputs.umask):
+            self.inputs.umask = 0
 
     def _gen_subjects_dir(self):
         return os.getcwd()
