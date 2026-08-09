@@ -126,16 +126,22 @@ class BasePath(TraitType):
 
     def validate(self, objekt, name, value, return_pathlike=False):
         """Validate a value change."""
-        is_container_path = isinstance(value, ContainerPath)
+        if isinstance(value, ContainerPath):
+            # ContainerPath values are opaque strings meaningful only
+            # inside the container's shell (e.g. env-var expressions like
+            # $FSLDIR/...). They must never be round-tripped through
+            # pathlib, which normalizes path separators to the host's
+            # native convention (e.g. '/' -> '\' on Windows) and would
+            # corrupt a string that was never a real host filesystem path
+            # to begin with.
+            return value if return_pathlike else ContainerPath(value)
 
         try:
             value = Path(value)  # Use pathlib's validation
         except Exception:
             self.error(objekt, name, str(value))
 
-        # ContainerPath values only make sense inside the container image;
-        # skip host filesystem checks and host path resolution for them.
-        if self.exists and not is_container_path:
+        if self.exists:
             if not value.exists():
                 self.error(objekt, name, str(value))
 
@@ -145,11 +151,11 @@ class BasePath(TraitType):
             if self._is_dir and not value.is_dir():
                 self.error(objekt, name, str(value))
 
-        if self.resolve and not is_container_path:
+        if self.resolve:
             value = path_resolve(value, strict=self.exists)
 
         if not return_pathlike:
-            value = ContainerPath(str(value)) if is_container_path else str(value)
+            value = str(value)
         return value
 
 
@@ -340,14 +346,15 @@ class File(BasePath):
 
     def validate(self, objekt, name, value, return_pathlike=False):
         """Validate a value change."""
-        is_container_path = isinstance(value, ContainerPath)
+        if isinstance(value, ContainerPath):
+            return value if return_pathlike else ContainerPath(value)
         value = super().validate(objekt, name, value, return_pathlike=True)
         if self._exts:
             fname = value.name
             if not any(fname.endswith(e) for e in self._exts):
                 self.error(objekt, name, str(value))
         if not return_pathlike:
-            value = ContainerPath(str(value)) if is_container_path else str(value)
+            value = str(value)
         return value
 
 

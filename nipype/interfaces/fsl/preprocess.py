@@ -168,9 +168,14 @@ class BET(FSLCommand):
 
     def _format_arg(self, name, spec, value):
         formatted = super()._format_arg(name, spec, value)
-        if name == "in_file":
-            # Convert to relative path to prevent BET failure
-            # with long paths.
+        if name == "in_file" and not isdefined(self.inputs.container):
+            # Convert to relative path to prevent BET failure with long
+            # paths -- meaningful only for native host execution. Skipped
+            # when containerized: the container's shell is always POSIX,
+            # so the "long path" concern doesn't apply there, and applying
+            # this trick would otherwise emit OS-native separators (e.g.
+            # backslashes on a Windows host) into a command destined for
+            # a Linux shell inside the container.
             return op.relpath(formatted, start=os.getcwd())
         return formatted
 

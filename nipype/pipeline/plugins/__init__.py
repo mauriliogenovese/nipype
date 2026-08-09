@@ -5,7 +5,11 @@ from .debug import DebugPlugin
 from .linear import LinearPlugin
 from .pbs import PBSPlugin
 from .oar import OARPlugin
-from .sge import SGEPlugin
+try:
+    # Safe import to insure Windows compatibility
+    from .sge import SGEPlugin
+except ImportError:
+    SGEPlugin = None
 from .condor import CondorPlugin
 from .dagman import CondorDAGManPlugin
 from .multiproc import MultiProcPlugin

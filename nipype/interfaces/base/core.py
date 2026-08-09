@@ -861,6 +861,8 @@ class CommandLine(BaseInterface):
 
         docker_cmd += ["sh", "-c", f"umask 0000; {prelude_prefix}{runtime.cmdline}"]
 
+        if platform.system() == "Windows":
+            return sp.list2cmdline(docker_cmd)
         return " ".join(shlex.quote(part) for part in docker_cmd)
 
     def _build_container_path_map(self, runtime):
