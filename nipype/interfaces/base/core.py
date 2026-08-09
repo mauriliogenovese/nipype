@@ -17,6 +17,7 @@ import shlex
 import simplejson as json
 from traits.trait_errors import TraitError
 from pathlib import Path
+import platform
 
 from looseversion import LooseVersion
 
@@ -732,8 +733,18 @@ class CommandLine(BaseInterface):
 
         """
         out_environ = self._get_environ()
-        # Initialize runtime Bunch
 
+        # Windows-only: build the host->container path remap BEFORE
+        # generating cmdline, so _format_arg can rewrite File/Directory
+        # values while formatting arguments. Mirror mounts (used on
+        # Linux/macOS -- host and container paths identical) don't need
+        # this, so the map stays empty there and _format_arg is a no-op.
+        if isdefined(self.inputs.container) and platform.system() == "Windows":
+            self._container_path_map = self._build_container_path_map(runtime)
+        else:
+            self._container_path_map = {}
+
+        # Initialize runtime Bunch
         try:
             runtime.cmdline = self.cmdline
         except Exception as exc:
@@ -797,24 +808,32 @@ class CommandLine(BaseInterface):
     def _containerize_cmdline(self, runtime):
         """Wrap ``runtime.cmdline`` to run inside ``self.inputs.container``.
 
-        Mounts every host directory referenced by File/Directory inputs
-        (plus the node's cwd) into the container at the same path (mirror
-        mount) -- all read-write, per design. Runs as the image's own
-        default user/environment (no --user override; see
-        _check_container_available for why this requires a root-default
-        image), with a permissive umask so newly created output files are
-        accessible to the host user.
+        Linux/macOS: mirror mount (host and container paths identical).
+        Windows: uses the canonical path map built in _run_interface,
+        since host paths there can't be used directly as mount targets.
         """
-
+        path_map = getattr(self, "_container_path_map", None) or {}
         cwd = Path(runtime.cwd).resolve()
-        mount_roots = self._container_mount_sources(runtime)
-        mount_roots.add(cwd)
-        mount_roots = self._collapse_mount_roots(mount_roots)
 
-        docker_cmd = ["docker", "run", "--rm", "--init", "-w", str(cwd)]
-        for root in mount_roots:
-            mode = "" if os.access(root, os.W_OK) else ":ro"
-            docker_cmd += ["-v", f"{root}:{root}{mode}"]
+        if path_map:
+            container_cwd = path_map.get(cwd)
+            if container_cwd is None:
+                raise RuntimeError(
+                    "Internal error: node working directory missing from "
+                    "container path map."
+                )
+            docker_cmd = ["docker", "run", "--rm", "--init", "-w", container_cwd]
+            for host_root, container_root in path_map.items():
+                mode = "" if os.access(host_root, os.W_OK) else ":ro"
+                docker_cmd += ["-v", f"{host_root}:{container_root}{mode}"]
+        else:
+            mount_roots = self._container_mount_sources(runtime)
+            mount_roots.add(cwd)
+            mount_roots = self._collapse_mount_roots(mount_roots)
+            docker_cmd = ["docker", "run", "--rm", "--init", "-w", str(cwd)]
+            for root in mount_roots:
+                mode = "" if os.access(root, os.W_OK) else ":ro"
+                docker_cmd += ["-v", f"{root}:{root}{mode}"]
 
         for host_path, container_path, mode in self._container_extra_mounts():
             docker_cmd += ["-v", f"{host_path}:{container_path}{mode}"]
@@ -823,9 +842,51 @@ class CommandLine(BaseInterface):
             docker_cmd += ["-e", f"{key}={val}"]
 
         docker_cmd.append(self.inputs.container)
-        docker_cmd += ["sh", "-c", f"umask 0000 && exec {runtime.cmdline}"]
+        docker_cmd += ["sh", "-c", f"umask 0000; {runtime.cmdline}"]
 
         return " ".join(shlex.quote(part) for part in docker_cmd)
+
+    def _build_container_path_map(self, runtime):
+        """Windows-only: build a host -> canonical container path mapping.
+
+        Windows host paths (C:\\...) can't be used as bind-mount targets
+        inside a POSIX container, unlike Linux/macOS where mirror mounts
+        (identical host/container paths) work directly. Each mount root
+        gets an arbitrary but stable canonical POSIX path inside the
+        container (/mnt/nipype_volN), assigned deterministically by
+        sorting so repeated runs of the same node produce the same map.
+        """
+        cwd = Path(runtime.cwd).resolve()
+        mount_roots = self._container_mount_sources(runtime)
+        mount_roots.add(cwd)
+        mount_roots = self._collapse_mount_roots(mount_roots)
+        return {
+            root: f"/mnt/nipype_vol{i}"
+            for i, root in enumerate(sorted(mount_roots, key=str))
+        }
+
+    def _container_map_path(self, value):
+        """Rewrite `value` from its host path to the corresponding
+        canonical container path, if a Windows path map is active (see
+        _build_container_path_map). No-op (returns value unchanged) when
+        no map is active (Linux/macOS, or no container) or when the value
+        doesn't fall under any mapped root.
+        """
+        path_map = getattr(self, "_container_path_map", None)
+        if not path_map:
+            return value
+        try:
+            host_path = Path(value).resolve()
+        except Exception:
+            return value
+        for host_root, container_root in path_map.items():
+            try:
+                rel = host_path.relative_to(host_root)
+            except ValueError:
+                continue
+            rel_posix = rel.as_posix()
+            return container_root if rel_posix == "." else f"{container_root}/{rel_posix}"
+        return value
 
     def _format_arg(self, name, trait_spec, value):
         """A helper function for _parse_inputs
@@ -876,9 +937,11 @@ class CommandLine(BaseInterface):
                     # them would prevent that expansion, since a POSIX shell never
                     # expands variables inside single quotes.
                     pass
-                elif "'%s'" not in argstr and '"%s"' not in argstr:
-                    value = shlex.quote(value)
-            # Append options using format string.
+                else:
+                    value = self._container_map_path(value)
+                    if "'%s'" not in argstr and '"%s"' not in argstr:
+                        value = shlex.quote(value)
+                # Append options using format string.
             return argstr % value
 
     def _filename_from_source(self, name, chain=None):
