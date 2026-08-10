@@ -14,6 +14,7 @@ from traceback import format_exception
 import sys
 from logging import INFO
 import gc
+import subprocess as sp
 
 from copy import deepcopy
 import numpy as np
@@ -22,6 +23,7 @@ from ...utils.profiler import get_system_total_memory_gb
 from ..engine import MapNode
 from .base import DistributedPluginBase
 from ...utils.gpu_count import gpu_count
+from ...interfaces.base import isdefined, Undefined
 
 try:
     from textwrap import indent
@@ -226,6 +228,49 @@ class MultiProcPlugin(DistributedPluginBase):
             logger.warning('Nodes demand more GPU than allowed (%d).', self.n_gpu_procs)
             if self.raise_insufficient:
                 raise RuntimeError('Insufficient GPU resources available for job')
+
+        # Windows-only: Docker Desktop runs containers inside a VM with its
+        # own, separately configured CPU allocation -- a lower cap than the
+        # host's own CPU count (self.processors) may apply. Only relevant
+        # for containerized nodes (see CommandLine.container).
+        if sys.platform.startswith("win"):
+            self._check_container_cpu_limits(graph)
+
+    def _check_container_cpu_limits(self, graph):
+        """Warn/raise if any containerized node's n_procs exceeds the
+        Docker Desktop VM's own CPU count, following the same
+        raise_insufficient convention as the native-resource checks above.
+        """
+        vm_cpus = None
+        for node in graph.nodes():
+            interface = node.interface
+            if not isdefined(getattr(interface.inputs, "container", Undefined)):
+                continue
+            container_type = getattr(interface.inputs, "container_type", "docker")
+            if container_type != "docker":
+                continue
+            if vm_cpus is None:
+                result = sp.run(
+                    [container_type, "info", "--format", "{{.NCPU}}"],
+                    capture_output=True, text=True, check=False,
+                )
+                try:
+                    vm_cpus = int(result.stdout.strip())
+                except (ValueError, AttributeError):
+                    vm_cpus = 0  # couldn't determine; skip remaining checks
+            if not vm_cpus:
+                continue
+            if node.n_procs > vm_cpus:
+                logger.warning(
+                    "Node %s requests %d CPUs for its container, but the "
+                    "Docker Desktop VM only has %d CPUs available.",
+                    node.fullname, node.n_procs, vm_cpus,
+                )
+                if self.raise_insufficient:
+                    raise RuntimeError(
+                        "Insufficient Docker Desktop VM CPU resources "
+                        f"available for job {node.fullname}"
+                    )
 
     def _postrun_check(self):
         self.pool.shutdown()

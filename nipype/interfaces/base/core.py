@@ -23,7 +23,7 @@ from looseversion import LooseVersion
 
 from ... import config, logging
 from ...utils.provenance import write_provenance
-from ...utils.misc import str2bool
+from ...utils.misc import str2bool, is_gpu_node_inputs
 from ...utils.filemanip import (
     canonicalize_env,
     get_dependencies,
@@ -814,10 +814,19 @@ class CommandLine(BaseInterface):
                     "container path map."
                 )
             docker_cmd = ["docker", "run", "--rm", "--init"]
+
+            # Enable gpu if requested
+            if is_gpu_node_inputs(self.inputs):
+                docker_cmd += ["--gpus", "all"]
+
+            # Apply multicore option to the container (num_threads is the standard, openmp used only by Reconall)
             num_threads = getattr(self.inputs, "num_threads", Undefined)
+            if not isdefined(num_threads):
+                num_threads = getattr(self.inputs, "openmp", Undefined)
             if isdefined(num_threads):
                 docker_cmd += ["--cpus", str(num_threads)]
-            docker_cmd += ["-w", container_cwd]  # (o str(cwd), a seconda del ramo mirror/remap)
+
+            docker_cmd += ["-w", container_cwd]
             for host_root, container_root in path_map.items():
                 mode = "" if os.access(host_root, os.W_OK) else ":ro"
                 docker_cmd += ["-v", f"{host_root}:{container_root}{mode}"]
@@ -826,7 +835,18 @@ class CommandLine(BaseInterface):
             mount_roots = self._container_mount_sources(runtime)
             mount_roots.add(cwd)
             mount_roots = self._collapse_mount_roots(mount_roots)
-            docker_cmd = ["docker", "run", "--rm", "--init", "-w", str(cwd)]
+            docker_cmd = ["docker", "run", "--rm", "--init"]
+
+            if is_gpu_node_inputs(self.inputs):
+                docker_cmd += ["--gpus", "all"]
+
+            num_threads = getattr(self.inputs, "num_threads", Undefined)
+            if not isdefined(num_threads):
+                num_threads = getattr(self.inputs, "openmp", Undefined)
+            if isdefined(num_threads):
+                docker_cmd += ["--cpus", str(num_threads)]
+
+            docker_cmd += ["-w", str(cwd)]
             for root in mount_roots:
                 mode = "" if os.access(root, os.W_OK) else ":ro"
                 docker_cmd += ["-v", f"{root}:{root}{mode}"]
@@ -1121,11 +1141,9 @@ class CommandLine(BaseInterface):
         Also verifies the image's default user is root -- running as
         non-root would require chmod/chown on host-owned files to make
         them accessible inside the container, which this implementation
-        deliberately never does (see _containerize_cmdline) -- reusing the
-        same ``inspect`` call instead of a separate round-trip.
-
-        Returns the resolved path to the engine binary, so _run_interface
-        can reuse it without calling which() a second time.
+        deliberately never does (see _containerize_cmdline). Root inside
+        the container is therefore a hard requirement, verified upfront
+        via image metadata only (no container is started here).
         """
         engine_path = which(container_type, env=os.environ)
         if engine_path is None:
@@ -1133,28 +1151,6 @@ class CommandLine(BaseInterface):
                 f'Container engine "{container_type}" not found on host. '
                 "Please install it to run containerized commands."
             )
-
-        num_threads = getattr(self.inputs, "num_threads", Undefined)
-        if isdefined(num_threads) and platform.system() == "Windows":
-            # On Windows, docker run --cpus is capped by the Docker Desktop
-            # VM's own CPU allocation, not the host's. Fail fast if the VM
-            # has fewer CPUs than requested, rather than silently running
-            # with less than nipype's own scheduling believes is available.
-            result = sp.run(
-                [container_type, "info", "--format", "{{.NCPU}}"],
-                capture_output=True, text=True, check=False,
-            )
-            try:
-                vm_cpus = int(result.stdout.strip())
-            except (ValueError, AttributeError):
-                vm_cpus = None
-            if vm_cpus is not None and vm_cpus < num_threads:
-                raise RuntimeError(
-                    f"Requested num_threads={num_threads} but "
-                    f"the Docker Desktop VM only has {vm_cpus} CPUs available. "
-                    "Increase the VM's CPU allocation in Docker Desktop "
-                    "settings, or lower num_threads."
-                )
 
         result = sp.run(
             [container_type, "inspect", "--format", "{{.Config.User}}", image],

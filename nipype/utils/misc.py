@@ -363,3 +363,16 @@ def rgetcwd(error=True):
             )
         warn('Current folder does not exist, replacing with "%s" instead.' % cwd)
     return cwd
+
+def is_gpu_node_inputs(inputs):
+    """Return True if `inputs` requests GPU execution, following the
+    use_cuda/use_gpu convention used across nipype interfaces.
+
+    Shared by Node.is_gpu_node() (native execution scheduling) and
+    CommandLine._containerize_cmdline (decides whether to pass --gpus
+    to `docker run`), so both stay in sync automatically if this
+    convention is ever extended.
+    """
+    return bool(getattr(inputs, "use_cuda", False)) or bool(
+        getattr(inputs, "use_gpu", False)
+    )

@@ -19,7 +19,7 @@ from logging import INFO
 from tempfile import mkdtemp
 
 from ... import config, logging
-from ...utils.misc import flatten, unflatten, str2bool, dict_diff
+from ...utils.misc import flatten, unflatten, str2bool, dict_diff, is_gpu_node_inputs
 from ...utils.ram_estimator import RamEstimator
 from ...utils.filemanip import (
     md5,
@@ -839,9 +839,7 @@ Error populating the inputs of node "%s": the results file of the source node \
         self.inputs.update(**opts)
 
     def is_gpu_node(self):
-        return bool(getattr(self.inputs, 'use_cuda', False)) or bool(
-            getattr(self.inputs, 'use_gpu', False)
-        )
+        return is_gpu_node_inputs(self.inputs)
 
 
 class JoinNode(Node):
