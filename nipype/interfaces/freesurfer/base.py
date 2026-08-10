@@ -129,53 +129,44 @@ class FSLicenseMixin:
     execution. Used by FSCommand and by other FreeSurfer CommandLine
     subclasses that, for historical reasons, don't inherit from
     FSCommand directly (see GH nipy/nipype#2655 -- ReconAll is one of
-    these; this mixin lets it opt in without depending on a hierarchy
-    fix that issue explicitly decided against).
+    these).
     """
 
     _CONTAINER_LICENSE_PATH = "/tmp/fs_license.txt"
-    _default_license_file = None
 
     @classmethod
     def set_default_license_file(cls, license_file):
         """Set a FreeSurfer license file used by default by every class
         using this mixin (FSCommand, ReconAll, ...), unless a specific
-        node overrides it via inputs.license_file. Sets the attribute
-        on FSLicenseMixin itself (not on `cls`), so the default is
-        shared across all FreeSurfer interfaces regardless of which one
-        this is called on."""
-        if not os.path.exists(os.path.abspath(license_file)):
-            msg = "License file %s not found. " % license_file
-            raise ValueError(msg)
-        FSLicenseMixin._default_license_file = os.path.abspath(license_file)
+        node overrides it via inputs.license_file.
 
-    def _container_extra_prelude(self):
-        prelude = super()._container_extra_prelude()
-        if self._resolved_license_file():
-            # Best-effort compatibility with FreeSurfer versions predating
-            # (or with unreliable early support for) FS_LICENSE: also drop
-            # the license where those versions expect it to be found,
-            # $FREESURFER_HOME/license.txt. FREESURFER_HOME is resolved
-            # here inside the container -- the image already has it set
-            # correctly for its own version, so no host-side guessing is
-            # needed. Silently skipped if unset or not writable.
-            prelude.append(
-                f'[ -n "$FREESURFER_HOME" ] && '
-                f'ln -sf {self._CONTAINER_LICENSE_PATH} "$FREESURFER_HOME/license.txt"'
-            )
-        return prelude
+        Implemented via the FS_LICENSE environment variable rather
+        than an in-memory class attribute: nipype's parallel plugins
+        (e.g. MultiProc) run nodes in separate worker processes, and
+        on Windows (where the 'spawn' start method is mandatory,
+        unlike Linux's 'fork') those workers do NOT inherit Python
+        state set in the main process -- only explicitly passed
+        arguments and the OS-level environment are inherited. Setting
+        an environment variable guarantees every worker process sees
+        the same default, regardless of how it was started.
+        """
+        resolved = os.path.abspath(license_file)
+        if not os.path.exists(resolved):
+            raise ValueError("License file %s not found. " % license_file)
+        os.environ["FS_LICENSE"] = resolved
 
     def _resolved_license_file(self):
         """Resolve which license file to use, in order of precedence:
         1. This instance's own inputs.license_file, if set.
-        2. The class-wide default set via set_default_license_file().
-        3. FS_LICENSE already defined in the host environment.
+        2. FS_LICENSE from the environment -- either set directly by
+           the user/host setup, or via set_default_license_file()
+           (which sets this same variable, for reliable propagation
+           across worker processes spawned by nipype's parallel
+           plugins).
         Returns None if no license is configured anywhere.
         """
         if isdefined(getattr(self.inputs, "license_file", Undefined)):
             return str(Path(self.inputs.license_file).resolve())
-        if FSLicenseMixin._default_license_file:
-            return FSLicenseMixin._default_license_file
         host_license = os.environ.get("FS_LICENSE")
         if host_license:
             return str(Path(host_license).resolve())
@@ -193,6 +184,16 @@ class FSLicenseMixin:
         if self._resolved_license_file():
             env["FS_LICENSE"] = self._CONTAINER_LICENSE_PATH
         return env
+
+    def _container_extra_prelude(self):
+        prelude = super()._container_extra_prelude()
+        if self._resolved_license_file():
+            prelude.append(
+                f'[ -n "$FREESURFER_HOME" ] && '
+                f'ln -sf {self._CONTAINER_LICENSE_PATH} "$FREESURFER_HOME/license.txt"'
+            )
+        return prelude
+
 
 class FSCommand(FSLicenseMixin, CommandLine):
     """General support for FreeSurfer commands.

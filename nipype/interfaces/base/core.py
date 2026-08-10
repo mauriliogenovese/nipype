@@ -719,32 +719,8 @@ class CommandLine(BaseInterface):
             return o
 
     def _run_interface(self, runtime, correct_return_codes=(0,)):
-        """Execute command via subprocess
-
-        Parameters
-        ----------
-        runtime : passed by the run function
-
-        Returns
-        -------
-        runtime :
-            updated runtime information
-            adds stdout, stderr, merged, cmdline, dependencies, command_path
-
-        """
         out_environ = self._get_environ()
 
-        # Windows-only: build the host->container path remap BEFORE
-        # generating cmdline, so _format_arg can rewrite File/Directory
-        # values while formatting arguments. Mirror mounts (used on
-        # Linux/macOS -- host and container paths identical) don't need
-        # this, so the map stays empty there and _format_arg is a no-op.
-        if isdefined(self.inputs.container) and platform.system() == "Windows":
-            self._container_path_map = self._build_container_path_map(runtime)
-        else:
-            self._container_path_map = {}
-
-        # Initialize runtime Bunch
         try:
             runtime.cmdline = self.cmdline
         except Exception as exc:
@@ -758,12 +734,8 @@ class CommandLine(BaseInterface):
         runtime.environ.update(out_environ)
         runtime.success_codes = correct_return_codes
 
-        # which $cmd
         executable_name = shlex.split(self._cmd_prefix + self.cmd)[0]
 
-        # Containerized execution: the executable may not exist on the host
-        # (it lives inside the image), so skip which()/get_dependencies on
-        # the host and check the container engine is available instead.
         if isdefined(self.inputs.container):
             runtime.command_path = getattr(
                 self, "_container_engine_path", None
@@ -819,23 +791,37 @@ class CommandLine(BaseInterface):
         """Wrap ``runtime.cmdline`` to run inside ``self.inputs.container``.
 
         Linux/macOS: mirror mount (host and container paths identical).
-        Windows: uses the canonical path map built in _run_interface,
-        since host paths there can't be used directly as mount targets.
+        Windows: host paths can't be used as mount targets, so this maps
+        each mount root to a canonical POSIX path and performs a single
+        text substitution pass over the fully-assembled cmdline -- after
+        all interface-specific formatting (argstr, any custom _format_arg
+        path tricks) has already run using real, valid host paths, exactly
+        as in native execution. This avoids needing any per-interface
+        Windows-specific patches.
         """
-        path_map = getattr(self, "_container_path_map", None) or {}
+        if platform.system() == "Windows":
+            path_map = self._build_container_path_map(runtime)
+        else:
+            path_map = {}
+
         cwd = Path(runtime.cwd).resolve()
 
         if path_map:
-            container_cwd = path_map.get(cwd)
+            container_cwd = self._container_path_for(cwd, path_map)
             if container_cwd is None:
                 raise RuntimeError(
                     "Internal error: node working directory missing from "
                     "container path map."
                 )
-            docker_cmd = ["docker", "run", "--rm", "--init", "-w", container_cwd]
+            docker_cmd = ["docker", "run", "--rm", "--init"]
+            num_threads = getattr(self.inputs, "num_threads", Undefined)
+            if isdefined(num_threads):
+                docker_cmd += ["--cpus", str(num_threads)]
+            docker_cmd += ["-w", container_cwd]  # (o str(cwd), a seconda del ramo mirror/remap)
             for host_root, container_root in path_map.items():
                 mode = "" if os.access(host_root, os.W_OK) else ":ro"
                 docker_cmd += ["-v", f"{host_root}:{container_root}{mode}"]
+            inner_cmdline = self._windows_remap_cmdline(runtime.cmdline, path_map)
         else:
             mount_roots = self._container_mount_sources(runtime)
             mount_roots.add(cwd)
@@ -844,6 +830,7 @@ class CommandLine(BaseInterface):
             for root in mount_roots:
                 mode = "" if os.access(root, os.W_OK) else ":ro"
                 docker_cmd += ["-v", f"{root}:{root}{mode}"]
+            inner_cmdline = runtime.cmdline
 
         for host_path, container_path, mode in self._container_extra_mounts():
             docker_cmd += ["-v", f"{host_path}:{container_path}{mode}"]
@@ -858,12 +845,45 @@ class CommandLine(BaseInterface):
         ]
         prelude = "; ".join(prelude_parts)
         prelude_prefix = f"{prelude}; " if prelude else ""
-
-        docker_cmd += ["sh", "-c", f"umask 0000; {prelude_prefix}{runtime.cmdline}"]
+        docker_cmd += ["sh", "-c", f"umask 0000; {prelude_prefix}{inner_cmdline}"]
 
         if platform.system() == "Windows":
             return sp.list2cmdline(docker_cmd)
         return " ".join(shlex.quote(part) for part in docker_cmd)
+
+    def _windows_remap_cmdline(self, cmdline, path_map):
+        """Rewrite a fully-assembled (host-native) cmdline string for
+        Windows: replace each mount root's literal host path with its
+        canonical container path, then flip any remaining OS-native
+        separators to POSIX. Applied once, after all interface-specific
+        formatting is done, so quirks like FSL BET's relpath shortcut
+        (which computes a real, valid Windows-relative path) keep working
+        without needing interface-specific patches -- their native-style
+        output is normalized here rather than avoided upstream.
+        """
+        for host_root, container_root in sorted(
+                path_map.items(), key=lambda kv: -len(str(kv[0]))
+        ):
+            cmdline = cmdline.replace(str(host_root), container_root)
+        return cmdline.replace("\\", "/")
+
+    def _container_path_for(self, host_path, path_map):
+        """Find which mount root (from path_map) contains host_path, and
+        return the corresponding canonical container path (root + the
+        relative sub-path). Needed because _collapse_mount_roots keeps
+        only the outermost root among nested/overlapping paths, so a
+        nested path (e.g. a node's own cwd, when it happens to live
+        under a broader mounted root) may not be a literal key in
+        path_map even though it is still covered by one of its mounts.
+        """
+        for host_root, container_root in path_map.items():
+            try:
+                rel = host_path.relative_to(host_root)
+            except ValueError:
+                continue
+            rel_posix = rel.as_posix()
+            return container_root if rel_posix == "." else f"{container_root}/{rel_posix}"
+        return None
 
     def _build_container_path_map(self, runtime):
         """Windows-only: build a host -> canonical container path mapping.
@@ -883,29 +903,6 @@ class CommandLine(BaseInterface):
             root: f"/mnt/nipype_vol{i}"
             for i, root in enumerate(sorted(mount_roots, key=str))
         }
-
-    def _container_map_path(self, value):
-        """Rewrite `value` from its host path to the corresponding
-        canonical container path, if a Windows path map is active (see
-        _build_container_path_map). No-op (returns value unchanged) when
-        no map is active (Linux/macOS, or no container) or when the value
-        doesn't fall under any mapped root.
-        """
-        path_map = getattr(self, "_container_path_map", None)
-        if not path_map:
-            return value
-        try:
-            host_path = Path(value).resolve()
-        except Exception:
-            return value
-        for host_root, container_root in path_map.items():
-            try:
-                rel = host_path.relative_to(host_root)
-            except ValueError:
-                continue
-            rel_posix = rel.as_posix()
-            return container_root if rel_posix == "." else f"{container_root}/{rel_posix}"
-        return value
 
     def _format_arg(self, name, trait_spec, value):
         """A helper function for _parse_inputs
@@ -951,16 +948,10 @@ class CommandLine(BaseInterface):
         else:
             if trait_spec.is_trait_type(BasePath):
                 if isinstance(value, ContainerPath):
-                    # ContainerPath values are meant to be expanded by the shell
-                    # running inside the container (e.g. $FSL_DIR/...); quoting
-                    # them would prevent that expansion, since a POSIX shell never
-                    # expands variables inside single quotes.
                     pass
-                else:
-                    value = self._container_map_path(value)
-                    if "'%s'" not in argstr and '"%s"' not in argstr:
-                        value = shlex.quote(value)
-                # Append options using format string.
+                elif "'%s'" not in argstr and '"%s"' not in argstr:
+                    value = shlex.quote(value)
+            # Append options using format string.
             return argstr % value
 
     def _filename_from_source(self, name, chain=None):
@@ -1142,6 +1133,28 @@ class CommandLine(BaseInterface):
                 f'Container engine "{container_type}" not found on host. '
                 "Please install it to run containerized commands."
             )
+
+        num_threads = getattr(self.inputs, "num_threads", Undefined)
+        if isdefined(num_threads) and platform.system() == "Windows":
+            # On Windows, docker run --cpus is capped by the Docker Desktop
+            # VM's own CPU allocation, not the host's. Fail fast if the VM
+            # has fewer CPUs than requested, rather than silently running
+            # with less than nipype's own scheduling believes is available.
+            result = sp.run(
+                [container_type, "info", "--format", "{{.NCPU}}"],
+                capture_output=True, text=True, check=False,
+            )
+            try:
+                vm_cpus = int(result.stdout.strip())
+            except (ValueError, AttributeError):
+                vm_cpus = None
+            if vm_cpus is not None and vm_cpus < num_threads:
+                raise RuntimeError(
+                    f"Requested num_threads={num_threads} but "
+                    f"the Docker Desktop VM only has {vm_cpus} CPUs available. "
+                    "Increase the VM's CPU allocation in Docker Desktop "
+                    "settings, or lower num_threads."
+                )
 
         result = sp.run(
             [container_type, "inspect", "--format", "{{.Config.User}}", image],
