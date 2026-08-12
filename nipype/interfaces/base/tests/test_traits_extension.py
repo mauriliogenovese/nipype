@@ -3,7 +3,13 @@
 """Check the resolving/rebasing feature of ``BasePath``s."""
 
 from ... import base as nib
-from ..traits_extension import rebase_path_traits, resolve_path_traits, Path
+from ..traits_extension import (
+    rebase_path_traits,
+    resolve_path_traits,
+    collect_path_traits,
+    ContainerPath,
+    Path,
+)
 
 
 class _test_spec(nib.TraitedSpec):
@@ -321,3 +327,48 @@ def test_rebase_resolve_path_traits():
 
     k = resolve_path_traits(spec.trait("k"), k, "/some/path")
     assert k == v
+
+
+class _container_spec(nib.TraitedSpec):
+    a = nib.File(exists=True)
+    b = nib.Directory(exists=True)
+    c = nib.traits.List(nib.File(exists=True))
+
+
+def test_container_path_is_str():
+    cp = ContainerPath("$FSLDIR/data/standard/MNI152.nii.gz")
+    assert isinstance(cp, str)
+    assert cp == "$FSLDIR/data/standard/MNI152.nii.gz"
+
+
+def test_container_path_bypasses_existence_check():
+    # exists=True would normally reject a non-existent host path; a ContainerPath
+    # refers to a path inside the image and must be accepted verbatim
+    spec = _container_spec()
+    spec.a = ContainerPath("/does/not/exist/on/host.nii")
+    assert isinstance(spec.a, ContainerPath)
+    assert spec.a == "/does/not/exist/on/host.nii"
+
+    spec.b = ContainerPath("$SUBJECTS_DIR/fsaverage")
+    assert isinstance(spec.b, ContainerPath)
+
+
+def test_container_path_not_normalized():
+    # unexpanded shell variables and separators must survive untouched (no
+    # pathlib round-trip that would flip '/' to '\\' on Windows)
+    raw = "$FSLDIR/data/standard/MNI152.nii.gz"
+    spec = _container_spec()
+    spec.a = ContainerPath(raw)
+    assert spec.a == raw
+
+
+def test_collect_path_traits_preserves_container_path_type(tmp_path):
+    real = tmp_path / "real.nii"
+    real.write_text("x")
+    spec = _container_spec()
+    spec.c = [str(real), ContainerPath("$FSLDIR/tpl.nii")]
+
+    collected = collect_path_traits(spec.trait("c"), spec.c, str(tmp_path))
+    # both leaves are returned, and the ContainerPath keeps its distinct type
+    assert any(isinstance(v, ContainerPath) for v in collected)
+    assert any("real.nii" in str(v) for v in collected)

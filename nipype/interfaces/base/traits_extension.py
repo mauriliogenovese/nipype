@@ -621,6 +621,7 @@ def resolve_path_traits(thistrait, value, cwd):
     """Resolve a BasePath-derived trait given an interface spec."""
     return _recurse_on_path_traits(_resolve_path, thistrait, value, cwd)
 
+
 def collect_path_traits(thistrait, value, cwd):
     """Collect every BasePath-derived leaf value reachable from
     ``value`` given the trait definition ``thistrait``, recursing

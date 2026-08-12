@@ -29,6 +29,8 @@ from .traits_extension import (
     OutputMultiObject,
 )
 
+from .containers import ContainerWrapper
+
 from ... import config, __version__
 
 _float_fmt = "{:.10f}".format
@@ -405,23 +407,15 @@ class CommandLineInputSpec(BaseInterfaceInputSpec):
     environ = traits.DictStrStr(
         desc="Environment variables", usedefault=True, nohash=True
     )
-    container = Str(
+    container = traits.Instance(
+        ContainerWrapper,
         desc=(
-            "Run this command inside the given container image "
-            "(e.g. 'bids/mriqc:latest') instead of natively on the host. "
+            "Run this command inside a container instead of natively on the "
+            "host. Set it to a ContainerWrapper carrying the engine and image "
+            "to use, e.g. ``DockerContainerWrapper('my-image:latest')``. "
             "Leave undefined to run natively (default, unchanged behavior)."
         ),
-        requires=["container_type"],
         nohash=True,
-    )
-    container_type = traits.Enum(
-        "docker",
-        usedefault=True,
-        nohash=True,
-        desc=(
-            "Container engine used to run `container`. Only 'docker' is "
-            "currently supported."
-        ),
     )
 
 

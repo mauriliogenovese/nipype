@@ -213,6 +213,7 @@ def get_system_total_memory_gb():
         memory_gb = float(mem_str) / (1024.0**3)
     elif "win" in sys.platform:
         import ctypes
+
         class MEMORYSTATUSEX(ctypes.Structure):
             _fields_ = [
                 ("dwLength", ctypes.c_ulong),
@@ -225,12 +226,11 @@ def get_system_total_memory_gb():
                 ("ullAvailVirtual", ctypes.c_ulonglong),
                 ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
             ]
+
         memory_status = MEMORYSTATUSEX()
         memory_status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(
-            ctypes.byref(memory_status)
-        )
-        memory_gb = memory_status.ullTotalPhys / (1024.0 ** 3)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory_status))
+        memory_gb = memory_status.ullTotalPhys / (1024.0**3)
     else:
         err_msg = "System platform: %s is not supported"
         raise Exception(err_msg)

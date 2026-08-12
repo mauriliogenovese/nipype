@@ -17,13 +17,13 @@ import shlex
 import simplejson as json
 from traits.trait_errors import TraitError
 from pathlib import Path
-import platform
 
 from looseversion import LooseVersion
 
 from ... import config, logging
 from ...utils.provenance import write_provenance
 from ...utils.misc import str2bool, is_gpu_node_inputs
+from .containers import ContainerRunSpec
 from ...utils.filemanip import (
     canonicalize_env,
     get_dependencies,
@@ -35,7 +35,14 @@ from ...utils.subprocess import run_command
 
 from ...external.due import due
 
-from .traits_extension import traits, isdefined, BasePath, Undefined, ContainerPath, collect_path_traits
+from .traits_extension import (
+    traits,
+    isdefined,
+    BasePath,
+    Undefined,
+    ContainerPath,
+    collect_path_traits,
+)
 from .specs import (
     BaseInterfaceInputSpec,
     CommandLineInputSpec,
@@ -603,6 +610,22 @@ class CommandLine(BaseInterface):
     >>> cli.inputs.get_hashval()[1]
     '11c37f97649cd61627f4afe5136af8c0'
 
+    Containerized execution
+    -----------------------
+    Any ``CommandLine`` interface can run inside a container instead of
+    natively on the host by setting the ``container`` input to a
+    :class:`~nipype.interfaces.base.containers.ContainerWrapper` carrying the
+    engine and image to use::
+
+        >>> from nipype.interfaces.base import DockerContainerWrapper
+        >>> cli = CommandLine(command='ls')
+        >>> cli.inputs.container = DockerContainerWrapper('debian:stable')
+        >>> res = cli.run()  # doctest: +SKIP
+
+    The interface's File/Directory inputs are bind-mounted into the container
+    automatically, so no interface-specific changes are needed. Leave
+    ``container`` undefined to run natively (the default, unchanged behavior).
+
     """
 
     input_spec = CommandLineInputSpec
@@ -736,10 +759,10 @@ class CommandLine(BaseInterface):
 
         executable_name = shlex.split(self._cmd_prefix + self.cmd)[0]
 
-        if isdefined(self.inputs.container):
+        if isdefined(getattr(self.inputs, "container", Undefined)):
             runtime.command_path = getattr(
                 self, "_container_engine_path", None
-            ) or which(self.inputs.container_type, env=runtime.environ)
+            ) or which(self.inputs.container.container_type, env=runtime.environ)
             runtime.dependencies = "<skipped: containerized execution>"
             runtime.cmdline = self._containerize_cmdline(runtime)
         else:
@@ -787,142 +810,36 @@ class CommandLine(BaseInterface):
         swallowed, never break the main command). Empty by default."""
         return []
 
+    def _container_num_threads(self):
+        """Requested CPU count for the container, or ``None``. ``num_threads``
+        is the standard input; ``openmp`` is used only by FreeSurfer's
+        ReconAll."""
+        num_threads = getattr(self.inputs, "num_threads", Undefined)
+        if not isdefined(num_threads):
+            num_threads = getattr(self.inputs, "openmp", Undefined)
+        return num_threads if isdefined(num_threads) else None
+
     def _containerize_cmdline(self, runtime):
         """Wrap ``runtime.cmdline`` to run inside ``self.inputs.container``.
 
-        Linux/macOS: mirror mount (host and container paths identical).
-        Windows: host paths can't be used as mount targets, so this maps
-        each mount root to a canonical POSIX path and performs a single
-        text substitution pass over the fully-assembled cmdline -- after
-        all interface-specific formatting (argstr, any custom _format_arg
-        path tricks) has already run using real, valid host paths, exactly
-        as in native execution. This avoids needing any per-interface
-        Windows-specific patches.
+        Gathers everything the interface knows (mount sources, environment,
+        package-specific extra mounts/env/prelude, GPU/CPU requests) into an
+        engine-agnostic :class:`ContainerRunSpec` and lets the user-supplied
+        :class:`ContainerWrapper` assemble the actual engine command line.
         """
-        if platform.system() == "Windows":
-            path_map = self._build_container_path_map(runtime)
-        else:
-            path_map = {}
-
-        cwd = Path(runtime.cwd).resolve()
-
-        if path_map:
-            container_cwd = self._container_path_for(cwd, path_map)
-            if container_cwd is None:
-                raise RuntimeError(
-                    "Internal error: node working directory missing from "
-                    "container path map."
-                )
-            docker_cmd = ["docker", "run", "--rm", "--init"]
-
-            # Enable gpu if requested
-            if is_gpu_node_inputs(self.inputs):
-                docker_cmd += ["--gpus", "all"]
-
-            # Apply multicore option to the container (num_threads is the standard, openmp used only by Reconall)
-            num_threads = getattr(self.inputs, "num_threads", Undefined)
-            if not isdefined(num_threads):
-                num_threads = getattr(self.inputs, "openmp", Undefined)
-            if isdefined(num_threads):
-                docker_cmd += ["--cpus", str(num_threads)]
-
-            docker_cmd += ["-w", container_cwd]
-            for host_root, container_root in path_map.items():
-                mode = "" if os.access(host_root, os.W_OK) else ":ro"
-                docker_cmd += ["-v", f"{host_root}:{container_root}{mode}"]
-            inner_cmdline = self._windows_remap_cmdline(runtime.cmdline, path_map)
-        else:
-            mount_roots = self._container_mount_sources(runtime)
-            mount_roots.add(cwd)
-            mount_roots = self._collapse_mount_roots(mount_roots)
-            docker_cmd = ["docker", "run", "--rm", "--init"]
-
-            if is_gpu_node_inputs(self.inputs):
-                docker_cmd += ["--gpus", "all"]
-
-            num_threads = getattr(self.inputs, "num_threads", Undefined)
-            if not isdefined(num_threads):
-                num_threads = getattr(self.inputs, "openmp", Undefined)
-            if isdefined(num_threads):
-                docker_cmd += ["--cpus", str(num_threads)]
-
-            docker_cmd += ["-w", str(cwd)]
-            for root in mount_roots:
-                mode = "" if os.access(root, os.W_OK) else ":ro"
-                docker_cmd += ["-v", f"{root}:{root}{mode}"]
-            inner_cmdline = runtime.cmdline
-
-        for host_path, container_path, mode in self._container_extra_mounts():
-            docker_cmd += ["-v", f"{host_path}:{container_path}{mode}"]
-
-        for key, val in {**self._get_environ(), **self._container_extra_env()}.items():
-            docker_cmd += ["-e", f"{key}={val}"]
-
-        docker_cmd.append(self.inputs.container)
-
-        prelude_parts = [
-            f"{{ {cmd} ; }} 2>/dev/null" for cmd in self._container_extra_prelude()
-        ]
-        prelude = "; ".join(prelude_parts)
-        prelude_prefix = f"{prelude}; " if prelude else ""
-        docker_cmd += ["sh", "-c", f"umask 0000; {prelude_prefix}{inner_cmdline}"]
-
-        if platform.system() == "Windows":
-            return sp.list2cmdline(docker_cmd)
-        return " ".join(shlex.quote(part) for part in docker_cmd)
-
-    def _windows_remap_cmdline(self, cmdline, path_map):
-        """Rewrite a fully-assembled (host-native) cmdline string for
-        Windows: replace each mount root's literal host path with its
-        canonical container path, then flip any remaining OS-native
-        separators to POSIX. Applied once, after all interface-specific
-        formatting is done, so quirks like FSL BET's relpath shortcut
-        (which computes a real, valid Windows-relative path) keep working
-        without needing interface-specific patches -- their native-style
-        output is normalized here rather than avoided upstream.
-        """
-        for host_root, container_root in sorted(
-                path_map.items(), key=lambda kv: -len(str(kv[0]))
-        ):
-            cmdline = cmdline.replace(str(host_root), container_root)
-        return cmdline.replace("\\", "/")
-
-    def _container_path_for(self, host_path, path_map):
-        """Find which mount root (from path_map) contains host_path, and
-        return the corresponding canonical container path (root + the
-        relative sub-path). Needed because _collapse_mount_roots keeps
-        only the outermost root among nested/overlapping paths, so a
-        nested path (e.g. a node's own cwd, when it happens to live
-        under a broader mounted root) may not be a literal key in
-        path_map even though it is still covered by one of its mounts.
-        """
-        for host_root, container_root in path_map.items():
-            try:
-                rel = host_path.relative_to(host_root)
-            except ValueError:
-                continue
-            rel_posix = rel.as_posix()
-            return container_root if rel_posix == "." else f"{container_root}/{rel_posix}"
-        return None
-
-    def _build_container_path_map(self, runtime):
-        """Windows-only: build a host -> canonical container path mapping.
-
-        Windows host paths (C:\\...) can't be used as bind-mount targets
-        inside a POSIX container, unlike Linux/macOS where mirror mounts
-        (identical host/container paths) work directly. Each mount root
-        gets an arbitrary but stable canonical POSIX path inside the
-        container (/mnt/nipype_volN), assigned deterministically by
-        sorting so repeated runs of the same node produce the same map.
-        """
-        cwd = Path(runtime.cwd).resolve()
-        mount_roots = self._container_mount_sources(runtime)
-        mount_roots.add(cwd)
-        mount_roots = self._collapse_mount_roots(mount_roots)
-        return {
-            root: f"/mnt/nipype_vol{i}"
-            for i, root in enumerate(sorted(mount_roots, key=str))
-        }
+        wrapper = self.inputs.container
+        spec = ContainerRunSpec(
+            image=wrapper.image,
+            cwd=Path(runtime.cwd).resolve(),
+            inner_cmdline=runtime.cmdline,
+            mount_roots=self._container_mount_sources(runtime),
+            environ={**self._get_environ(), **self._container_extra_env()},
+            extra_mounts=self._container_extra_mounts(),
+            prelude=self._container_extra_prelude(),
+            use_gpu=is_gpu_node_inputs(self.inputs),
+            num_threads=self._container_num_threads(),
+        )
+        return wrapper.build_command(spec)
 
     def _format_arg(self, name, trait_spec, value):
         """A helper function for _parse_inputs
@@ -1128,52 +1045,11 @@ class CommandLine(BaseInterface):
         following the same pattern used by other CommandLine subclasses
         that add their own pre-checks before delegating to super().run().
         """
-        if isdefined(self.inputs.container):
-            self._container_engine_path = self._check_container_available(
-                self.inputs.container, self.inputs.container_type
+        if isdefined(getattr(self.inputs, "container", Undefined)):
+            self._container_engine_path = self.inputs.container.check_available(
+                os.environ
             )
         return super().run(**inputs)
-
-    def _check_container_available(self, image, container_type):
-        """Fail fast, before running, if the container engine isn't
-        installed on the host, or the image can't be found/inspected.
-
-        Also verifies the image's default user is root -- running as
-        non-root would require chmod/chown on host-owned files to make
-        them accessible inside the container, which this implementation
-        deliberately never does (see _containerize_cmdline). Root inside
-        the container is therefore a hard requirement, verified upfront
-        via image metadata only (no container is started here).
-        """
-        engine_path = which(container_type, env=os.environ)
-        if engine_path is None:
-            raise OSError(
-                f'Container engine "{container_type}" not found on host. '
-                "Please install it to run containerized commands."
-            )
-
-        result = sp.run(
-            [container_type, "inspect", "--format", "{{.Config.User}}", image],
-            capture_output=True, text=True, check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"Container image '{image}' could not be inspected via "
-                f"'{container_type} inspect' (is it pulled/built locally?). "
-                f"Error:\n{result.stderr.strip()}"
-            )
-
-        user = result.stdout.strip()
-        if user not in ("", "0", "root", "0:0"):
-            raise RuntimeError(
-                f"Image '{image}' does not run as root by default "
-                f"(default user: '{user}'). This interface requires "
-                "container images whose default user is root, since file "
-                "permissions on the host are never modified to accommodate "
-                "non-root containers."
-            )
-
-        return engine_path
 
     def _container_mount_sources(self, runtime):
         """Resolve host filesystem directories to bind-mount into the
@@ -1203,18 +1079,6 @@ class CommandLine(BaseInterface):
                 roots.add(resolved if resolved.is_dir() else resolved.parent)
 
         return roots
-
-    @staticmethod
-    def _collapse_mount_roots(paths):
-        """Drop any path already covered by another in the set (keep only
-        the outermost root of each nested chain), to avoid redundant or
-        overlapping bind mounts."""
-        ordered = sorted(paths, key=lambda p: len(p.parts))
-        kept = []
-        for p in ordered:
-            if not any(p == k or k in p.parents for k in kept):
-                kept.append(p)
-        return kept
 
 
 class StdOutCommandLine(CommandLine):

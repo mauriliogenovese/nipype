@@ -5,12 +5,15 @@ from shutil import rmtree
 
 import pytest
 
+from types import SimpleNamespace
+
 from nipype.utils.misc import (
     container_to_string,
     str2bool,
     flatten,
     unflatten,
     dict_diff,
+    is_gpu_node_inputs,
 )
 
 
@@ -140,3 +143,17 @@ def test_dict_diff():
         "* Cached inputs: {}\n"
         "* New inputs: not a dict"
     )
+
+
+@pytest.mark.parametrize(
+    "attrs, expected",
+    [
+        ({}, False),
+        ({"use_cuda": False, "use_gpu": False}, False),
+        ({"use_cuda": True}, True),
+        ({"use_gpu": True}, True),
+        ({"use_cuda": False, "use_gpu": True}, True),
+    ],
+)
+def test_is_gpu_node_inputs(attrs, expected):
+    assert is_gpu_node_inputs(SimpleNamespace(**attrs)) is expected

@@ -364,6 +364,7 @@ def rgetcwd(error=True):
         warn('Current folder does not exist, replacing with "%s" instead.' % cwd)
     return cwd
 
+
 def is_gpu_node_inputs(inputs):
     """Return True if `inputs` requests GPU execution, following the
     use_cuda/use_gpu convention used across nipype interfaces.

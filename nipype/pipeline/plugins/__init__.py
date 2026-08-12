@@ -5,6 +5,7 @@ from .debug import DebugPlugin
 from .linear import LinearPlugin
 from .pbs import PBSPlugin
 from .oar import OARPlugin
+
 try:
     # Safe import to insure Windows compatibility
     from .sge import SGEPlugin

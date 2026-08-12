@@ -14,6 +14,14 @@ Downloading and installing
 
    users/install
 
+Running interfaces in containers
+================================
+
+.. toctree::
+   :maxdepth: 1
+
+   users/containers
+
 Beginner's guide
 ================
 

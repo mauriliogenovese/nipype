@@ -169,7 +169,8 @@ class BET(FSLCommand):
     def _format_arg(self, name, spec, value):
         formatted = super()._format_arg(name, spec, value)
         if name == "in_file":
-            # Convert to relative path to prevent BET failure with long paths
+            # Convert to relative path to prevent BET failure
+            # with long paths.
             return op.relpath(formatted, start=os.getcwd())
         return formatted
 

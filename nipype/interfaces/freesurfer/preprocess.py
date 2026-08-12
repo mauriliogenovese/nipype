@@ -28,7 +28,14 @@ from ..base import (
     isdefined,
     InputMultiObject,
 )
-from .base import FSCommand, FSTraitedSpec, FSTraitedSpecOpenMP, FSCommandOpenMP, Info, FSLicenseMixin
+from .base import (
+    FSCommand,
+    FSTraitedSpec,
+    FSTraitedSpecOpenMP,
+    FSCommandOpenMP,
+    Info,
+    FSLicenseMixin,
+)
 from .utils import copy2subjdir
 
 __docformat__ = "restructuredtext"

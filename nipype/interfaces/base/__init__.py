@@ -51,4 +51,10 @@ from .traits_extension import (
     ContainerPath,
 )
 
+from .containers import (
+    DockerContainerWrapper,
+    ContainerWrapper,
+    ContainerRunSpec,
+)
+
 from .support import Bunch, InterfaceResult, NipypeInterfaceError

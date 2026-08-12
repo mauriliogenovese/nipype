@@ -3,6 +3,7 @@
 import os
 import simplejson as json
 import logging
+from types import SimpleNamespace
 
 import pytest
 from unittest import mock
@@ -624,3 +625,94 @@ def test_CommandLine_escape(tmp_path):
     command = CatCommand(in_file=str(test_file))
     result = command.run()
     assert result.runtime.stdout == "content"
+
+
+# ---------------------------------------------------------------------------
+# Containerized execution (CommandLine <-> ContainerWrapper integration)
+# ---------------------------------------------------------------------------
+
+
+def test_container_input_rejects_non_wrapper():
+    cli = nib.CommandLine(command="ls")
+    # the ``container`` input must be a ContainerWrapper, not a bare string
+    with pytest.raises(nib.traits.TraitError):
+        cli.inputs.container = "bids/mriqc:latest"
+
+
+def test_container_input_accepts_wrapper():
+    cli = nib.CommandLine(command="ls")
+    assert not nib.isdefined(cli.inputs.container)
+    cli.inputs.container = nib.DockerContainerWrapper("busybox:latest")
+    assert nib.isdefined(cli.inputs.container)
+    assert cli.inputs.container.image == "busybox:latest"
+
+
+def test_container_num_threads():
+    class _Spec(nib.CommandLineInputSpec):
+        num_threads = nib.traits.Int()
+        openmp = nib.traits.Int()
+
+    class _Cmd(nib.CommandLine):
+        _cmd = "x"
+        input_spec = _Spec
+
+    cli = _Cmd()
+    assert cli._container_num_threads() is None
+    cli.inputs.openmp = 8  # openmp used as fallback (FreeSurfer ReconAll)
+    assert cli._container_num_threads() == 8
+    cli.inputs.num_threads = 4  # num_threads is the standard, takes precedence
+    assert cli._container_num_threads() == 4
+
+
+def test_container_mount_sources_excludes_container_paths(tmp_path):
+    class _Spec(nib.CommandLineInputSpec):
+        real = nib.File(exists=False)
+        template = nib.File(exists=False)
+
+    class _Cmd(nib.CommandLine):
+        _cmd = "x"
+        input_spec = _Spec
+
+    real = tmp_path / "sub" / "a.nii"
+    real.parent.mkdir()
+    real.write_text("x")
+
+    cli = _Cmd()
+    cli.inputs.real = str(real)
+    # a ContainerPath refers to a path inside the image, never on the host
+    cli.inputs.template = nib.ContainerPath("$FSLDIR/data/standard/x.nii")
+
+    roots = cli._container_mount_sources(SimpleNamespace(cwd=str(tmp_path)))
+    # the real file's containing dir is mounted; the ContainerPath is not
+    assert real.parent.resolve() in roots
+    assert not any("FSLDIR" in str(r) for r in roots)
+
+
+def test_containerize_cmdline_end_to_end(tmp_path):
+    class _Spec(nib.CommandLineInputSpec):
+        in_file = nib.File(argstr="%s", exists=False)
+
+    class _Cmd(nib.CommandLine):
+        _cmd = "echo"
+        input_spec = _Spec
+
+    cli = _Cmd()
+    cli.inputs.container = nib.DockerContainerWrapper("img:tag")
+    runtime = SimpleNamespace(cwd=str(tmp_path), cmdline=cli.cmdline)
+    out = cli._containerize_cmdline(runtime)
+
+    assert out.startswith("docker run --rm --init")
+    assert "img:tag" in out
+    assert "echo" in out
+
+
+def test_container_run_fails_fast(tmp_path):
+    class _FailingWrapper(nib.DockerContainerWrapper):
+        def check_available(self, env=None):
+            raise RuntimeError("engine unavailable")
+
+    cli = nib.CommandLine(command="true")
+    cli.inputs.container = _FailingWrapper("img")
+    # run() must call check_available and propagate before executing anything
+    with pytest.raises(RuntimeError, match="engine unavailable"):
+        cli.run()

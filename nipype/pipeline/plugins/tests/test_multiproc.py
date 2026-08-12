@@ -181,3 +181,71 @@ def test_error_run_without_submitting(tmp_path, plugin):
 
     with pytest.raises(RuntimeError):
         wf.run(plugin=plugin)
+
+
+class _LimitWrapper(nib.DockerContainerWrapper):
+    """Docker wrapper stub with a fixed, injectable CPU cap (no docker call)."""
+
+    def __init__(self, image, limit):
+        super().__init__(image)
+        self._limit = limit
+
+    def cpu_limit(self):
+        return self._limit
+
+
+def _fake_node(container, n_procs, name="wf.node"):
+    from types import SimpleNamespace
+
+    inputs = SimpleNamespace(container=container)
+    return SimpleNamespace(
+        interface=SimpleNamespace(inputs=inputs), n_procs=n_procs, fullname=name
+    )
+
+
+class _FakeGraph:
+    def __init__(self, nodes):
+        self._nodes = nodes
+
+    def nodes(self):
+        return self._nodes
+
+
+def _plugin(raise_insufficient):
+    """A MultiProcPlugin without going through __init__ (no worker pool)."""
+    from nipype.pipeline.plugins.multiproc import MultiProcPlugin
+
+    plugin = object.__new__(MultiProcPlugin)
+    plugin.raise_insufficient = raise_insufficient
+    return plugin
+
+
+def test_container_cpu_limit_raises_when_exceeded():
+    graph = _FakeGraph([_fake_node(_LimitWrapper("img", 2), n_procs=4)])
+    with pytest.raises(RuntimeError, match="Insufficient docker CPU"):
+        _plugin(raise_insufficient=True)._check_container_cpu_limits(graph)
+
+
+def test_container_cpu_limit_warns_without_raise(caplog):
+    import logging
+
+    graph = _FakeGraph([_fake_node(_LimitWrapper("img", 2), n_procs=4)])
+    with caplog.at_level(logging.WARNING, logger="nipype.workflow"):
+        _plugin(raise_insufficient=False)._check_container_cpu_limits(graph)
+    assert "only has 2 CPUs available" in caplog.text
+
+
+def test_container_cpu_limit_within_bounds_ok():
+    graph = _FakeGraph([_fake_node(_LimitWrapper("img", 4), n_procs=4)])
+    # n_procs == limit is fine, must not raise
+    _plugin(raise_insufficient=True)._check_container_cpu_limits(graph)
+
+
+def test_container_cpu_limit_none_is_noop():
+    graph = _FakeGraph([_fake_node(_LimitWrapper("img", None), n_procs=999)])
+    _plugin(raise_insufficient=True)._check_container_cpu_limits(graph)
+
+
+def test_container_cpu_limit_skips_non_container_nodes():
+    graph = _FakeGraph([_fake_node(nib.Undefined, n_procs=999)])
+    _plugin(raise_insufficient=True)._check_container_cpu_limits(graph)
