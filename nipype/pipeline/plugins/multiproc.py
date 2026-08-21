@@ -17,12 +17,14 @@ import gc
 
 from copy import deepcopy
 import numpy as np
+
+from ..engine.base import EngineBase
 from ... import logging
 from ...utils.profiler import get_system_total_memory_gb
 from ..engine import MapNode
 from .base import DistributedPluginBase
 from ...utils.gpu_count import gpu_count
-from ...interfaces.base import isdefined, Undefined
+from ...interfaces.base import isdefined, Undefined, ContainerWrapper
 
 try:
     from textwrap import indent
@@ -243,7 +245,10 @@ class MultiProcPlugin(DistributedPluginBase):
         engine_limits = {}  # container_type -> CPU cap (cached per engine)
         for node in graph.nodes():
             container = getattr(node.interface.inputs, "container", Undefined)
+
             if not isdefined(container):
+                continue
+            if not isinstance(container, ContainerWrapper):
                 continue
             container_type = container.container_type
             if container_type not in engine_limits:
