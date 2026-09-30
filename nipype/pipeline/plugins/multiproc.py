@@ -250,44 +250,20 @@ class MultiProcPlugin(DistributedPluginBase):
         Sends jobs to workers when system resources are available.
         """
 
-        # Check to see if a job is available (jobs with all dependencies run)
-        # See https://github.com/nipy/nipype/pull/2200#discussion_r141605722
-        # See also https://github.com/nipy/nipype/issues/2372
-        jobids = np.flatnonzero(
-            ~self.proc_done & (self.depidx.sum(axis=0) == 0).__array__()
-        )
+        while True:
+            # Check to see if a job is available (jobs with all dependencies run)
+            # See https://github.com/nipy/nipype/pull/2200#discussion_r141605722
+            # See also https://github.com/nipy/nipype/issues/2372
+            jobids = np.flatnonzero(
+                ~self.proc_done & (self.depidx.sum(axis=0) == 0).__array__()
+            )
 
-        # Check available resources by summing all threads and memory used
-        free_memory_gb, free_processors, free_gpu_slots = self._check_resources(
-            self.pending_tasks
-        )
+            # Check available resources by summing all threads and memory used
+            free_memory_gb, free_processors, free_gpu_slots = self._check_resources(
+                self.pending_tasks
+            )
 
-        stats = (
-            len(self.pending_tasks),
-            len(jobids),
-            free_memory_gb,
-            self.memory_gb,
-            free_processors,
-            self.processors,
-            free_gpu_slots,
-            self.n_gpu_procs,
-        )
-
-        if self._stats != stats:
-            tasks_list_msg = ""
-
-            if logger.level <= INFO:
-                running_tasks = [
-                    "  * %s" % self.procs[jobid].fullname
-                    for _, jobid in self.pending_tasks
-                ]
-                if running_tasks:
-                    tasks_list_msg = "\nCurrently running:\n"
-                    tasks_list_msg += "\n".join(running_tasks)
-                    tasks_list_msg = indent(tasks_list_msg, " " * 21)
-            logger.info(
-                "[MultiProc] Running %d tasks, and %d jobs ready. Free "
-                "memory (GB): %0.2f/%0.2f, Free processors: %d/%d, Free GPU slot:%d/%d.%s",
+            stats = (
                 len(self.pending_tasks),
                 len(jobids),
                 free_memory_gb,
@@ -296,131 +272,165 @@ class MultiProcPlugin(DistributedPluginBase):
                 self.processors,
                 free_gpu_slots,
                 self.n_gpu_procs,
-                tasks_list_msg,
             )
-            self._stats = stats
 
-        if free_memory_gb < 0.01 or free_processors == 0:
-            logger.debug("No resources available")
-            return
+            if self._stats != stats:
+                tasks_list_msg = ""
 
-        if len(jobids) + len(self.pending_tasks) == 0:
-            logger.debug(
-                "No tasks are being run, and no jobs can "
-                "be submitted to the queue. Potential deadlock"
-            )
-            return
+                if logger.level <= INFO:
+                    running_tasks = [
+                        "  * %s" % self.procs[jobid].fullname
+                        for _, jobid in self.pending_tasks
+                    ]
+                    if running_tasks:
+                        tasks_list_msg = "\nCurrently running:\n"
+                        tasks_list_msg += "\n".join(running_tasks)
+                        tasks_list_msg = indent(tasks_list_msg, " " * 21)
+                logger.info(
+                    "[MultiProc] Running %d tasks, and %d jobs ready. Free "
+                    "memory (GB): %0.2f/%0.2f, Free processors: %d/%d, Free GPU slot:%d/%d.%s",
+                    len(self.pending_tasks),
+                    len(jobids),
+                    free_memory_gb,
+                    self.memory_gb,
+                    free_processors,
+                    self.processors,
+                    free_gpu_slots,
+                    self.n_gpu_procs,
+                    tasks_list_msg,
+                )
+                self._stats = stats
 
-        jobids = self._sort_jobs(jobids, scheduler=self.plugin_args.get("scheduler"))
+            if free_memory_gb < 0.01 or free_processors == 0:
+                logger.debug("No resources available")
+                break
 
-        # Run garbage collector before potentially submitting jobs
-        gc.collect()
-
-        # Submit jobs
-        for jobid in jobids:
-            # First expand mapnodes
-            if isinstance(self.procs[jobid], MapNode):
-                try:
-                    num_subnodes = self.procs[jobid].num_subnodes()
-                except Exception:
-                    traceback = format_exception(*sys.exc_info())
-                    self._clean_queue(
-                        jobid, graph, result={"result": None, "traceback": traceback}
-                    )
-                    self.proc_pending[jobid] = False
-                    continue
-                if num_subnodes > 1:
-                    submit = self._submit_mapnode(jobid)
-                    if not submit:
-                        continue
-
-            # Check requirements of this job
-            next_job_gb = min(self.procs[jobid].mem_gb_runtime, self.memory_gb)
-            next_job_th = min(self.procs[jobid].n_procs, self.processors)
-            next_job_gpu_th = min(self.procs[jobid].n_procs, self.n_gpu_procs)
-
-            is_gpu_node = self.procs[jobid].is_gpu_node()
-
-            # If node does not fit, skip at this moment
-            if (
-                next_job_th > free_processors
-                or next_job_gb > free_memory_gb
-                or (is_gpu_node and next_job_gpu_th > free_gpu_slots)
-            ):
+            if len(jobids) + len(self.pending_tasks) == 0:
                 logger.debug(
-                    "Cannot allocate job %d (%0.2fGB, %d threads, %d GPU slots).",
+                    "No tasks are being run, and no jobs can "
+                    "be submitted to the queue. Potential deadlock"
+                )
+                break
+                
+            if len(jobids) == 0:
+                break
+
+            jobids = self._sort_jobs(jobids, scheduler=self.plugin_args.get("scheduler"))
+
+            # Run garbage collector before potentially submitting jobs
+            gc.collect()
+            
+            jobs_processed = 0
+
+            # Submit jobs
+            for jobid in jobids:
+                # First expand mapnodes
+                if isinstance(self.procs[jobid], MapNode):
+                    try:
+                        num_subnodes = self.procs[jobid].num_subnodes()
+                    except Exception:
+                        traceback = format_exception(*sys.exc_info())
+                        self._clean_queue(
+                            jobid, graph, result={"result": None, "traceback": traceback}
+                        )
+                        self.proc_pending[jobid] = False
+                        continue
+                    if num_subnodes > 1:
+                        submit = self._submit_mapnode(jobid)
+                        if not submit:
+                            continue
+
+                # Check requirements of this job
+                next_job_gb = min(self.procs[jobid].mem_gb_runtime, self.memory_gb)
+                next_job_th = min(self.procs[jobid].n_procs, self.processors)
+                next_job_gpu_th = min(self.procs[jobid].n_procs, self.n_gpu_procs)
+
+                is_gpu_node = self.procs[jobid].is_gpu_node()
+
+                # If node does not fit, skip at this moment
+                if (
+                    next_job_th > free_processors
+                    or next_job_gb > free_memory_gb
+                    or (is_gpu_node and next_job_gpu_th > free_gpu_slots)
+                ):
+                    logger.debug(
+                        "Cannot allocate job %d (%0.2fGB, %d threads, %d GPU slots).",
+                        jobid,
+                        next_job_gb,
+                        next_job_th,
+                        next_job_gpu_th,
+                    )
+                    continue
+
+                free_memory_gb -= next_job_gb
+                free_processors -= next_job_th
+                if is_gpu_node:
+                    free_gpu_slots -= next_job_gpu_th
+                logger.debug(
+                    "Allocating %s ID=%d (%0.2fGB, %d threads). Free: "
+                    "%0.2fGB, %d threads, %d GPU slots.",
+                    self.procs[jobid].fullname,
                     jobid,
                     next_job_gb,
                     next_job_th,
-                    next_job_gpu_th,
+                    free_memory_gb,
+                    free_processors,
+                    free_gpu_slots,
                 )
-                continue
 
-            free_memory_gb -= next_job_gb
-            free_processors -= next_job_th
-            if is_gpu_node:
-                free_gpu_slots -= next_job_gpu_th
-            logger.debug(
-                "Allocating %s ID=%d (%0.2fGB, %d threads). Free: "
-                "%0.2fGB, %d threads, %d GPU slots.",
-                self.procs[jobid].fullname,
-                jobid,
-                next_job_gb,
-                next_job_th,
-                free_memory_gb,
-                free_processors,
-                free_gpu_slots,
-            )
+                # change job status in appropriate queues
+                self.proc_done[jobid] = True
+                self.proc_pending[jobid] = True
+                jobs_processed += 1
 
-            # change job status in appropriate queues
-            self.proc_done[jobid] = True
-            self.proc_pending[jobid] = True
+                # If cached and up-to-date just retrieve it, don't run
+                if self._local_hash_check(jobid, graph):
+                    continue
 
-            # If cached and up-to-date just retrieve it, don't run
-            if self._local_hash_check(jobid, graph):
-                continue
+                cached, updated = self.procs[jobid].is_cached()
+                # updatehash and run_without_submitting are also run locally
+                if (cached and updatehash and not updated) or self.procs[
+                    jobid
+                ].run_without_submitting:
+                    logger.debug("Running node %s on master thread", self.procs[jobid])
+                    try:
+                        self.procs[jobid].run(updatehash=updatehash)
+                    except Exception:
+                        traceback = format_exception(*sys.exc_info())
+                        self._run_errors.append(traceback)
+                        self._clean_queue(
+                            jobid, graph, result={"result": None, "traceback": traceback}
+                        )
 
-            cached, updated = self.procs[jobid].is_cached()
-            # updatehash and run_without_submitting are also run locally
-            if (cached and updatehash and not updated) or self.procs[
-                jobid
-            ].run_without_submitting:
-                logger.debug("Running node %s on master thread", self.procs[jobid])
-                try:
-                    self.procs[jobid].run(updatehash=updatehash)
-                except Exception:
-                    traceback = format_exception(*sys.exc_info())
-                    self._run_errors.append(traceback)
-                    self._clean_queue(
-                        jobid, graph, result={"result": None, "traceback": traceback}
-                    )
+                    # Release resources
+                    self._task_finished_cb(jobid)
+                    self._remove_node_dirs()
+                    free_memory_gb += next_job_gb
+                    free_processors += next_job_th
+                    if is_gpu_node:
+                        free_gpu_slots += next_job_gpu_th
+                    # Display stats next loop
+                    self._stats = None
 
-                # Release resources
-                self._task_finished_cb(jobid)
-                self._remove_node_dirs()
-                free_memory_gb += next_job_gb
-                free_processors += next_job_th
-                if is_gpu_node:
-                    free_gpu_slots += next_job_gpu_th
+                    # Clean up any debris from running node in main process
+                    gc.collect()
+                    continue
+
+                # Task should be submitted to workers
+                # Send job to task manager and add to pending tasks
+                if self._status_callback:
+                    self._status_callback(self.procs[jobid], "start")
+                tid = self._submit_job(deepcopy(self.procs[jobid]), updatehash=updatehash)
+                if tid is None:
+                    self.proc_done[jobid] = False
+                    self.proc_pending[jobid] = False
+                else:
+                    self.pending_tasks.insert(0, (tid, jobid))
                 # Display stats next loop
                 self._stats = None
-
-                # Clean up any debris from running node in main process
-                gc.collect()
-                continue
-
-            # Task should be submitted to workers
-            # Send job to task manager and add to pending tasks
-            if self._status_callback:
-                self._status_callback(self.procs[jobid], "start")
-            tid = self._submit_job(deepcopy(self.procs[jobid]), updatehash=updatehash)
-            if tid is None:
-                self.proc_done[jobid] = False
-                self.proc_pending[jobid] = False
-            else:
-                self.pending_tasks.insert(0, (tid, jobid))
-            # Display stats next loop
-            self._stats = None
+                
+            if jobs_processed == 0:
+                break
 
     def _sort_jobs(self, jobids, scheduler="tsort"):
         if scheduler == "mem_thread":
