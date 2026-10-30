@@ -47,8 +47,9 @@ another exception occurred:\n\n{}.""".format(exc).splitlines(keepends=True)
     timeofcrash = strftime("%Y%m%d-%H%M%S")
     try:
         login_name = getpass.getuser()
-    except (KeyError, OSError):
-        login_name = f"UID{os.getuid():d}"
+    except (KeyError, OSError, ImportError):
+        # os.getuid is not available on Windows
+        login_name = f"UID{os.getuid():d}" if hasattr(os, "getuid") else "unknown"
     crashfile = f"crash-{timeofcrash}-{login_name}-{name}-{uuid.uuid4()}"
     crashdir = node.config["execution"].get("crashdump_dir", os.getcwd())
 
