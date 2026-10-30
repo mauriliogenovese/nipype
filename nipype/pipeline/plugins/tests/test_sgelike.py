@@ -1,9 +1,12 @@
+import nipype
 from nipype.pipeline.plugins.base import SGELikeBatchManagerBase
 from nipype.interfaces.utility import Function
 import nipype.pipeline.engine as pe
 import pytest
 from unittest.mock import patch
+import os
 import subprocess
+import sys
 
 
 def crasher():
@@ -34,3 +37,10 @@ def test_crashfile_creation(tmp_path):
         tmp_path.glob("crash*crasher*.txt")
     )
     assert len(crashfiles) == 1
+
+
+def test_plugins_import_without_pwd():
+    # pwd is POSIX-only; plugins must still import where it is unavailable
+    code = "import sys; sys.modules['pwd'] = None; import nipype.pipeline.plugins"
+    root = os.path.dirname(os.path.dirname(nipype.__file__))
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=root)

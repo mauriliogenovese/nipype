@@ -1,7 +1,6 @@
 """Parallel workflow execution via SGE"""
 
 import os
-import pwd
 import re
 import subprocess
 import time
@@ -152,6 +151,8 @@ class QstatSubstitute:
         """request definitive job completion information for the current job
         from the qacct report
         """
+        import pwd
+
         sge_debug_print(
             "WARNING:  "
             "CONTACTING qacct for finished jobs, "
@@ -277,6 +278,8 @@ class QstatSubstitute:
         -s z gives recently completed jobs (**recently** is very ambiguous)
         -s s suspended jobs
         """
+        import pwd
+
         sge_debug_print(
             "WARNING:  CONTACTING qmaster for jobs, "
             "{}: {}".format(time.time(), reason_for_qstat)
