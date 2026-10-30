@@ -492,6 +492,31 @@ def test_datasink_localcopy(dummy_input, tmpdir):
     assert src_md5 == dst_md5
 
 
+def test_datasink_makedirs_race(dummy_input, tmpdir, monkeypatch):
+    """
+    DataSink must tolerate output directories created concurrently by
+    another process (e.g., sibling DataSinks sharing a base directory)
+    """
+    base_dir = tmpdir.strpath
+    ds = nio.DataSink(base_directory=base_dir, container="outputs")
+    setattr(ds.inputs, "text_file", dummy_input)
+
+    # Simulate losing the race: a sibling creates the directory first
+    makedirs = os.makedirs
+
+    def racing_makedirs(name, *args, **kwargs):
+        makedirs(name, exist_ok=True)
+        return makedirs(name, *args, **kwargs)
+
+    monkeypatch.setattr(nio.os, "makedirs", racing_makedirs)
+    ds.run()
+    monkeypatch.undo()
+
+    assert os.path.isfile(
+        os.path.join(base_dir, "outputs", "text_file", os.path.basename(dummy_input))
+    )
+
+
 def test_datasink_substitutions(tmpdir):
     indir = tmpdir.mkdir("-Tmp-nipype_ds_subs_in")
     outdir = tmpdir.mkdir("-Tmp-nipype_ds_subs_out")

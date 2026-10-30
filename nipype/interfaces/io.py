@@ -64,13 +64,7 @@ def copytree(src, dst, use_hardlink=False):
     created by another process.
     """
     names = os.listdir(src)
-    try:
-        os.makedirs(dst)
-    except OSError as why:
-        if "File exists" in why.strerror:
-            pass
-        else:
-            raise why
+    os.makedirs(dst, exist_ok=True)
     errors = []
     for name in names:
         srcname = os.path.join(src, name)
@@ -713,13 +707,7 @@ class DataSink(IOBase):
             outdir = os.path.abspath(outdir)
             # Create the directory if it doesn't exist
             if not os.path.exists(outdir):
-                try:
-                    os.makedirs(outdir)
-                except OSError as inst:
-                    if "File exists" in inst.strerror:
-                        pass
-                    else:
-                        raise (inst)
+                os.makedirs(outdir, exist_ok=True)
 
         # Iterate through outputs attributes {key : path(s)}
         for key, files in list(self.inputs._outputs.items()):
@@ -764,13 +752,7 @@ class DataSink(IOBase):
                 if not s3_flag or isdefined(self.inputs.local_copy):
                     # Create output directory if it doesn't exist
                     if not os.path.exists(path):
-                        try:
-                            os.makedirs(path)
-                        except OSError as inst:
-                            if "File exists" in inst.strerror:
-                                pass
-                            else:
-                                raise (inst)
+                        os.makedirs(path, exist_ok=True)
                     # If src is a file, copy it to dst
                     if os.path.isfile(src):
                         iflogger.debug("copyfile: %s %s", src, dst)
