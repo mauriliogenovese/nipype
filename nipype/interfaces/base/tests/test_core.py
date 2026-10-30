@@ -1,6 +1,8 @@
 # emacs: -*- mode: python; py-indent-offset: 4; indent-tabs-mode: nil -*-
 # vi: set ft=python sts=4 ts=4 sw=4 et:
 import os
+import shutil
+import sys
 import simplejson as json
 import logging
 
@@ -10,6 +12,7 @@ from unittest import mock
 from .... import config
 from ....testing import example_data
 from ... import base as nib
+from ..core import _executable_name
 from ....pipeline import engine as pe
 from ....pipeline.engine.nodes import NodeExecutionError
 from ..support import Bunch
@@ -627,6 +630,70 @@ def test_CommandLine_escape(tmp_path):
     command = CatCommand(in_file=str(test_file))
     result = command.run()
     assert result.runtime.stdout == "content"
+
+
+@pytest.mark.parametrize(
+    "platform, expected",
+    [
+        ("win32", r'tool "C:\data dir\in file.txt"'),
+        ("linux", r"tool 'C:\data dir\in file.txt'"),
+    ],
+)
+def test_CommandLine_quote_platform(platform, expected):
+    class InputSpec(nib.TraitedSpec):
+        in_file = nib.File(desc="a file", argstr="%s")
+
+    class Tool(nib.CommandLine):
+        input_spec = InputSpec
+        _cmd = "tool"
+
+    with mock.patch.object(sys, "platform", platform):
+        assert Tool(in_file=r"C:\data dir\in file.txt").cmdline == expected
+
+
+@pytest.mark.parametrize(
+    "platform, cmd, expected",
+    [
+        (
+            "win32",
+            r'"C:\Program Files\tool\bin.exe" -v',
+            r"C:\Program Files\tool\bin.exe",
+        ),
+        ("win32", r"C:\tools\bin.exe -v", r"C:\tools\bin.exe"),
+        ("win32", "bet -v", "bet"),
+        ("linux", "'/opt/my tools/bet' -v", "/opt/my tools/bet"),
+        ("linux", "bet -v", "bet"),
+    ],
+)
+def test_CommandLine_executable_name(platform, cmd, expected):
+    with mock.patch.object(sys, "platform", platform):
+        assert _executable_name(cmd) == expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires cmd.exe")
+def test_CommandLine_windows_paths(tmp_path):
+    tool_dir = tmp_path / "my tools"
+    tool_dir.mkdir()
+    exe = tool_dir / "findstr.exe"
+    shutil.copy(os.path.join(os.environ["SystemRoot"], "System32", "findstr.exe"), exe)
+    test_file = tmp_path / "data dir" / "test file.txt"
+    test_file.parent.mkdir()
+    test_file.write_text("hello world\nsecond line\n")
+
+    class InputSpec(nib.CommandLineInputSpec):
+        in_file = nib.File(desc="a file", exists=True, argstr="%s", position=-1)
+
+    class FindStr(nib.CommandLine):
+        input_spec = InputSpec
+        _cmd = f'"{exe}"'
+
+    command = FindStr(
+        args="/n hello", in_file=str(test_file), terminal_output="allatonce"
+    )
+    assert command.cmdline == f'"{exe}" /n hello "{test_file}"'
+    result = command.run()
+    assert result.runtime.command_path == str(exe)
+    assert result.runtime.stdout.strip() == "1:hello world"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX signals")

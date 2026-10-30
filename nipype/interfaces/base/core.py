@@ -13,6 +13,7 @@ interfaces are found in the ``specs`` module.
 
 import os
 import signal
+import sys
 import subprocess as sp
 import shlex
 import simplejson as json
@@ -62,6 +63,29 @@ VALID_TERMINAL_OUTPUT = [
     "none",
 ]
 __docformat__ = "restructuredtext"
+
+
+def _quote_arg(arg):
+    """Quote a command-line argument for the shell used by ``run_command``.
+
+    Commands run with ``shell=True``, i.e. through ``cmd.exe`` on Windows,
+    which does not understand POSIX single-quoting.
+    """
+    if sys.platform == "win32":
+        return sp.list2cmdline([arg])
+    return shlex.quote(arg)
+
+
+def _executable_name(cmd):
+    """Return the executable (first token) of a command string."""
+    if sys.platform == "win32":
+        # cmd.exe only groups with double quotes, and backslashes are path
+        # separators, not escape characters
+        cmd = cmd.lstrip()
+        if cmd.startswith('"'):
+            return cmd[1:].partition('"')[0]
+        return cmd.split()[0]
+    return shlex.split(cmd)[0]
 
 
 class Interface:
@@ -757,7 +781,7 @@ class CommandLine(BaseInterface):
         runtime.success_codes = correct_return_codes
 
         # which $cmd
-        executable_name = shlex.split(self._cmd_prefix + self.cmd)[0]
+        executable_name = _executable_name(self._cmd_prefix + self.cmd)
         cmd_path = which(executable_name, env=runtime.environ)
 
         if cmd_path is None:
@@ -813,7 +837,7 @@ class CommandLine(BaseInterface):
                 if inner_traits and any(
                     t.is_trait_type(BasePath) for t in inner_traits
                 ):
-                    values = [shlex.quote(elt) for elt in value]
+                    values = [_quote_arg(elt) for elt in value]
 
             if argstr.endswith("..."):
                 # repeatable option
@@ -826,7 +850,7 @@ class CommandLine(BaseInterface):
         else:
             if trait_spec.is_trait_type(BasePath):
                 if "'%s'" not in argstr and '"%s"' not in argstr:
-                    value = shlex.quote(value)
+                    value = _quote_arg(value)
             # Append options using format string.
             return argstr % value
 
