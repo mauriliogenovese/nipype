@@ -464,8 +464,11 @@ class Dcm2niix(CommandLine):
         filenames = []
         for line in stdout.split("\n"):
             if line.startswith("Convert "):  # output
-                fname = str(re.search(r"\S+/\S+", line).group(0))
-                filenames.append(os.path.abspath(fname))
+                # e.g. "Convert 1 DICOM as /out dir/name (64x64x30x1)";
+                # the path may contain spaces or Windows separators
+                match = re.search(r" as (.+?)(?: \([\dx]+\))?\s*$", line)
+                if match:
+                    filenames.append(os.path.abspath(match.group(1)))
         return filenames
 
     def _parse_files(self, filenames):
