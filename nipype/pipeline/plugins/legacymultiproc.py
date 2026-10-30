@@ -206,10 +206,10 @@ class LegacyMultiProcPlugin(DistributedPluginBase):
         non_daemon = self.plugin_args.get("non_daemon", True)
         maxtasks = self.plugin_args.get("maxtasksperchild", 10)
         self.processors = self.plugin_args.get("n_procs", cpu_count())
-        self.memory_gb = self.plugin_args.get(
-            "memory_gb",  # Allocate 90% of system memory
-            get_system_total_memory_gb() * 0.9,
-        )
+        if "memory_gb" in self.plugin_args:
+            self.memory_gb = self.plugin_args["memory_gb"]
+        else:  # Allocate 90% of system memory
+            self.memory_gb = get_system_total_memory_gb() * 0.9
         self.raise_insufficient = self.plugin_args.get("raise_insufficient", True)
 
         # Instantiate different thread pools for non-daemon processes

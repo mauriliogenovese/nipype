@@ -215,8 +215,10 @@ def get_system_total_memory_gb():
     elif "darwin" in sys.platform:
         mem_str = os.popen("sysctl hw.memsize").read().strip().split(" ")[-1]
         memory_gb = float(mem_str) / (1024.0**3)
+    elif psutil is not None:
+        memory_gb = psutil.virtual_memory().total / (1024.0**3)
     else:
-        err_msg = "System platform: %s is not supported"
+        err_msg = "System platform: %s is not supported" % sys.platform
         raise Exception(err_msg)
 
     # Return memory

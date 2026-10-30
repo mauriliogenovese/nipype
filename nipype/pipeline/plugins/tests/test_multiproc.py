@@ -181,3 +181,17 @@ def test_error_run_without_submitting(tmp_path, plugin):
 
     with pytest.raises(RuntimeError):
         wf.run(plugin=plugin)
+
+
+@pytest.mark.parametrize("plugin", ["MultiProc", "LegacyMultiProc"])
+def test_memory_gb_skips_system_memory_detection(monkeypatch, plugin):
+    from nipype.pipeline.plugins import legacymultiproc, multiproc
+
+    def _fail():
+        raise AssertionError("system memory should not be queried")
+
+    module = multiproc if plugin == "MultiProc" else legacymultiproc
+    monkeypatch.setattr(module, "get_system_total_memory_gb", _fail)
+    plugin_cls = getattr(module, plugin + "Plugin")
+    plugin_obj = plugin_cls(plugin_args={"n_procs": 1, "memory_gb": 1.5})
+    assert plugin_obj.memory_gb == 1.5
