@@ -69,6 +69,30 @@ class Stream:
         self._lastidx = len(self._rows)
 
 
+def _select_pipes(streams, timeout):
+    """Emulate ``select.select`` on Windows pipes (select only supports sockets).
+
+    A stream is ready when its pipe has data available or has been closed
+    (so that the subsequent read returns EOF, as with select on POSIX).
+    """
+    import msvcrt
+    import time
+    import _winapi
+
+    ready = []
+    for stream in streams:
+        try:
+            handle = msvcrt.get_osfhandle(stream.fileno())
+            avail = _winapi.PeekNamedPipe(handle, 0)[0]
+        except OSError:  # broken pipe: writer closed, read will hit EOF
+            avail = 1
+        if avail:
+            ready.append(stream)
+    if not ready:
+        time.sleep(timeout)
+    return ready, [], []
+
+
 def run_command(runtime, output=None, timeout=0.01, write_cmdline=False):
     """Run a command, read stdout and stderr, prefix with timestamp.
 
@@ -124,7 +148,10 @@ def run_command(runtime, output=None, timeout=0.01, write_cmdline=False):
 
         def _process(drain=0):
             try:
-                res = select.select(streams, [], [], timeout)
+                if sys.platform == "win32":
+                    res = _select_pipes(streams, timeout)
+                else:
+                    res = select.select(streams, [], [], timeout)
             except OSError as e:
                 iflogger.info(e)
                 if e.errno == errno.EINTR:
